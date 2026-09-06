@@ -1,0 +1,4 @@
+X,Y,MSE,Roughness (nm),E Inf,IR Amp,Thickness # 1 (nm),A,B,% Thickness Non-uniformity,Thickness # 3 (nm),n of Cauchy @ 632.8 nm,Included
+-1,0,2.058,3.46,2.876,92.051,,,,,,,True
+0,0,17.105,28.01,,,,1.728,0.00239,15.54,270.5,1.73381,True
+0,-2,2.936,9.66,,,847.66,1.606,0.03144,11.54,,,True

@@ -113,3 +113,49 @@ Each computer should have its own local `.venv`. Do not sync `.venv`.
 6. Measurement GUI updates.
 7. Repeat.
 8. At completion, baseline CSV/statistics/default maps are saved automatically.
+
+## V1.1 GUI revision
+
+This revision applies the first round of hands-on GUI feedback.
+
+### Measurement
+- Low-Profile Automatic XY Stage is now the default.
+- Measurement Quality is a pop-out dialog.
+- Valid maps no longer show a redundant "mapping definition is valid" message.
+- Progress grid shows integer-mm coordinate tick labels.
+- Live table displays `X (mm)` and `Y (mm)`.
+- Analysis-only `Included` is hidden from the Measurement table.
+- Progress-map points and table rows select each other.
+- Retake has a usage tooltip and selected-coordinate readout.
+- Combo-box/input text has additional left padding.
+
+### Results
+- The data section is now named **Mapping Data**.
+- **Parameter Statistics** shows all numeric parameters simultaneously as columns.
+- Plot and colorbar use a fixed width ratio when the Results splitter is resized.
+- The default Matplotlib toolbar is removed.
+- `Save Plot` is the only permanent plot toolbar action.
+- Plot type selector supports:
+  - Interpolated Map
+  - Measured Points + Values
+  - Pixel / Cell Map
+- Mouse movement reports X, Y, and the interpolated parameter value below the graph.
+- Clicking a measured point selects/highlights the matching Mapping Data row.
+- Clicking a Mapping Data row highlights the matching point on the graph.
+- Ignore / Enable applies globally to all parameters and statistics.
+- Click the plot title to edit it.
+- Click an axis tick label to choose Auto / 1 / 2 / 3 / 5 mm tick spacing.
+
+### Navigation
+- Measurement and Results now use real application tabs.
+- Help remains a pop-out control at the upper-right of the tab bar.
+
+
+## V1.2 visual cleanup
+
+- Removed the prototype-development banner from Measurement.
+- Start Measurement is larger and green; Abort is larger and red.
+- X/Y coordinate labels on the Measurement grid have more space from the axes.
+- Browse is smaller and separated from the save-location field.
+- Measurement Quality is a compact button.
+- Measurement and Results tabs are larger and styled as primary application workspaces.

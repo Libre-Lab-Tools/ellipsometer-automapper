@@ -1,15 +1,22 @@
 """
 ABSTRACT
 --------
-Measurement page for the AutoMapper V1 GUI prototype.
+Measurement workspace for Ellipsometer AutoMapper.
 
-The left side contains experiment setup and simplified automatic-stage controls.
-The right side contains acquisition controls, the mapping progress grid, and the
-live measurement table.
+This page intentionally combines experiment setup and acquisition in one
+workspace. The left side defines the mapping and provides the simplified XY
+stage controls. The right side shows measurement progress and the live table.
 
-CompleteEASE acquisition is NOT connected in this first prototype.  Start
-Measurement generates simulated Thickness/MSE data so the workflow, progress
-colors, MSE warning behavior, and Results-page handoff can be tested first.
+This revision improves usability by:
+- making the automatic XY stage the default,
+- moving optional MSE quality settings into a pop-out dialog,
+- showing coordinate tick labels on the progress grid,
+- linking point selection between the progress grid and live table,
+- removing the analysis-only "Included" field from the Measurement table,
+- showing X/Y units explicitly in the displayed table,
+- and keeping validation silent unless an actual setup error exists.
+
+CompleteEASE acquisition is still simulated in this GUI prototype.
 """
 
 from __future__ import annotations
@@ -17,14 +24,16 @@ from __future__ import annotations
 import math
 import random
 import re
-from pathlib import Path
 
 import pandas as pd
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -35,7 +44,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -50,8 +58,49 @@ from stage_simulator import StageSimulator
 INVALID_WINDOWS_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
+class MeasurementQualityDialog(QDialog):
+    """Small optional dialog for acquisition-time quality flags."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Measurement Quality")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.flag_mse = QCheckBox("Flag high MSE")
+        self.flag_mse.setChecked(False)
+        form.addRow(self.flag_mse)
+
+        self.max_mse = QDoubleSpinBox()
+        self.max_mse.setRange(0.01, 100000.0)
+        self.max_mse.setValue(10.0)
+        self.max_mse.setDecimals(2)
+        form.addRow("Maximum MSE:", self.max_mse)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Measurements above the selected MSE limit are flagged in orange. "
+            "They are not automatically removed from the data."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666666;")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class ProgressGrid(QWidget):
-    """Small interactive XY grid used only for acquisition progress/retakes."""
+    """
+    Interactive mapping/progress grid.
+
+    The point selection is linked bidirectionally with the Measurement table.
+    Coordinate ticks are drawn directly from the requested integer-mm grid.
+    """
 
     point_clicked = pyqtSignal(int)
 
@@ -60,10 +109,11 @@ class ProgressGrid(QWidget):
         self.points: list[dict] = []
         self.selected_index: int | None = None
         self._screen_positions: dict[int, QPointF] = {}
-        self.setMinimumHeight(330)
+        self.setMinimumHeight(340)
 
     def set_points(self, points: list[dict]) -> None:
         self.points = points
+        self.selected_index = None
         self.update()
 
     def set_selected(self, index: int | None) -> None:
@@ -79,25 +129,58 @@ class ProgressGrid(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No map defined")
             return
 
-        area = self.rect().adjusted(42, 20, -22, -36)
-        xs = [p["X"] for p in self.points]
-        ys = [p["Y"] for p in self.points]
+        # Extra left/bottom space is reserved for coordinate tick labels.
+        area = self.rect().adjusted(96, 22, -24, -60)
+
+        xs = sorted(set(p["X"] for p in self.points))
+        ys = sorted(set(p["Y"] for p in self.points))
         xmin, xmax = min(xs), max(xs)
         ymin, ymax = min(ys), max(ys)
         xspan = max(xmax - xmin, 1)
         yspan = max(ymax - ymin, 1)
 
-        painter.setPen(QPen(QColor("#888888"), 1))
+        def screen_x(x):
+            return area.left() + (x - xmin) / xspan * area.width()
+
+        def screen_y(y):
+            return area.bottom() - (y - ymin) / yspan * area.height()
+
+        # Axes.
+        painter.setPen(QPen(QColor("#777777"), 1))
         painter.drawLine(area.left(), area.bottom(), area.right(), area.bottom())
         painter.drawLine(area.left(), area.top(), area.left(), area.bottom())
 
+        # Integer coordinate ticks/labels.
+        painter.setPen(QPen(QColor("#444444"), 1))
+        for x in xs:
+            sx = screen_x(x)
+            painter.drawLine(int(sx), area.bottom(), int(sx), area.bottom() + 5)
+            painter.drawText(
+                int(sx) - 22,
+                area.bottom() + 13,
+                44,
+                22,
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                str(int(x)),
+            )
+
+        for y in ys:
+            sy = screen_y(y)
+            painter.drawLine(area.left() - 5, int(sy), area.left(), int(sy))
+            painter.drawText(
+                30,
+                int(sy) - 10,
+                area.left() - 58,
+                20,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                str(int(y)),
+            )
+
         self._screen_positions.clear()
 
-        for i, point in enumerate(self.points):
-            sx = area.left() + (point["X"] - xmin) / xspan * area.width()
-            sy = area.bottom() - (point["Y"] - ymin) / yspan * area.height()
-            center = QPointF(sx, sy)
-            self._screen_positions[i] = center
+        for index, point in enumerate(self.points):
+            center = QPointF(screen_x(point["X"]), screen_y(point["Y"]))
+            self._screen_positions[index] = center
 
             status = point.get("status", "PENDING")
             fill = {
@@ -107,18 +190,23 @@ class ProgressGrid(QWidget):
                 "WARNING": QColor("#df8b38"),
             }.get(status, QColor("#b7b7b7"))
 
-            pen = QPen(QColor("#202020"), 1.2)
-            if i == self.selected_index:
-                pen = QPen(QColor("#1f5fa8"), 3)
-
-            painter.setPen(pen)
+            # Draw the normal status-colored measurement point.
+            painter.setPen(QPen(QColor("#202020"), 1.2))
             painter.setBrush(QBrush(fill))
             painter.drawEllipse(center, 9, 9)
 
-        painter.setPen(QPen(QColor("#444444"), 1))
-        painter.drawText(area.center().x() - 18, self.height() - 8, "X (mm)")
+            # Selection is only a GUI aid, so make it intentionally obvious:
+            # a thick blue halo is drawn around the status-colored point.
+            if index == self.selected_index:
+                painter.setPen(QPen(QColor("#1565C0"), 4))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(center, 15, 15)
+
+        # Axis titles.
+        painter.setPen(QPen(QColor("#404040"), 1))
+        painter.drawText(area.center().x() - 24, self.height() - 8, "X (mm)")
         painter.save()
-        painter.translate(14, area.center().y() + 20)
+        painter.translate(14, area.center().y() + 22)
         painter.rotate(-90)
         painter.drawText(0, 0, "Y (mm)")
         painter.restore()
@@ -129,10 +217,10 @@ class ProgressGrid(QWidget):
 
         pos = event.position()
         best = None
-        for i, center in self._screen_positions.items():
-            d = math.hypot(pos.x() - center.x(), pos.y() - center.y())
-            if d <= 16 and (best is None or d < best[1]):
-                best = (i, d)
+        for index, center in self._screen_positions.items():
+            distance = math.hypot(pos.x() - center.x(), pos.y() - center.y())
+            if distance <= 16 and (best is None or distance < best[1]):
+                best = (index, distance)
 
         if best is not None:
             self.selected_index = best[0]
@@ -141,7 +229,7 @@ class ProgressGrid(QWidget):
 
 
 class MeasurementPage(QWidget):
-    """Combined Setup + Measurement screen."""
+    """Combined Setup + Measurement workspace."""
 
     dataframe_updated = pyqtSignal(object)
 
@@ -158,6 +246,8 @@ class MeasurementPage(QWidget):
         self.current_sequence_index = 0
         self.selected_point_index: int | None = None
 
+        self.quality_dialog = MeasurementQualityDialog(self)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._finish_simulated_point)
 
@@ -171,15 +261,6 @@ class MeasurementPage(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
-        prototype_note = QLabel(
-            "V1 prototype: GUI workflow, stage controls, progress behavior and "
-            "Results interaction are functional. CompleteEASE acquisition is "
-            "still simulated."
-        )
-        prototype_note.setWordWrap(True)
-        prototype_note.setStyleSheet("color: #666666;")
-        root.addWidget(prototype_note)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter, 1)
 
@@ -187,9 +268,10 @@ class MeasurementPage(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
 
-        setup_group = QGroupBox("Measurement Setup")
-        self.setup_group = setup_group
-        form = QFormLayout(setup_group)
+        self.setup_group = QGroupBox("Measurement Setup")
+        form = QFormLayout(self.setup_group)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(9)
 
         self.recipe_combo = QComboBox()
         self.recipe_combo.addItems(["Example Recipe", "Recipe connection pending"])
@@ -200,10 +282,15 @@ class MeasurementPage(QWidget):
         form.addRow("Map name:", self.map_name)
 
         save_row = QHBoxLayout()
+        save_row.setSpacing(10)
+
         self.save_location = QLineEdit()
         self.save_location.setPlaceholderText("Choose experiment parent folder")
+
         browse = QPushButton("Browse…")
+        browse.setMaximumWidth(82)
         browse.clicked.connect(self._choose_save_location)
+
         save_row.addWidget(self.save_location, 1)
         save_row.addWidget(browse)
         form.addRow("Save location:", save_row)
@@ -227,6 +314,8 @@ class MeasurementPage(QWidget):
             "Manual Stage",
             "Low-Profile Automatic XY Stage",
         ])
+        # Automatic stage is the default for this instrument.
+        self.stage_type.setCurrentIndex(1)
         self.stage_type.currentTextChanged.connect(self._stage_type_changed)
         form.addRow("Stage:", self.stage_type)
 
@@ -236,27 +325,20 @@ class MeasurementPage(QWidget):
         self.points_label = QLabel()
         form.addRow("Points:", self.points_label)
 
+        self.quality_button = QPushButton("Measurement Quality…")
+        self.quality_button.setMaximumWidth(165)
+        self.quality_button.clicked.connect(self.quality_dialog.exec)
+        form.addRow("", self.quality_button)
+
+        # Hidden unless a real setup problem exists.
         self.validation_label = QLabel()
         self.validation_label.setWordWrap(True)
+        self.validation_label.hide()
         form.addRow("", self.validation_label)
 
-        left_layout.addWidget(setup_group)
+        left_layout.addWidget(self.setup_group)
 
-        # Optional MSE acquisition flag.
-        qc_group = QGroupBox("Measurement Quality")
-        qc_layout = QFormLayout(qc_group)
-        self.flag_mse = QCheckBox("Flag high MSE")
-        self.flag_mse.setChecked(False)
-        qc_layout.addRow(self.flag_mse)
-
-        self.max_mse = QDoubleSpinBox()
-        self.max_mse.setRange(0.01, 100000.0)
-        self.max_mse.setValue(10.0)
-        self.max_mse.setDecimals(2)
-        qc_layout.addRow("Maximum MSE:", self.max_mse)
-        left_layout.addWidget(qc_group)
-
-        # Automatic stage block.
+        # Automatic-stage section appears only when automatic stage is selected.
         self.stage_group = QGroupBox("Automatic XY Stage")
         stage_layout = QVBoxLayout(self.stage_group)
 
@@ -281,6 +363,27 @@ class MeasurementPage(QWidget):
         self.down = QPushButton("↓")
         self.left_btn = QPushButton("←")
         self.right_btn = QPushButton("→")
+
+        # Jog arrows are intentionally bold and large because they are used
+        # for visual/manual alignment rather than as ordinary text buttons.
+        arrow_style = """
+            QPushButton {
+                font-family: Arial;
+                font-size: 22px;
+                font-weight: 900;
+                min-width: 46px;
+                min-height: 40px;
+                padding: 0px;
+            }
+        """
+        for arrow_button in (
+            self.up,
+            self.down,
+            self.left_btn,
+            self.right_btn,
+        ):
+            arrow_button.setStyleSheet(arrow_style)
+
         jog.addWidget(self.up, 0, 1)
         jog.addWidget(self.left_btn, 1, 0)
         jog.addWidget(self.right_btn, 1, 2)
@@ -319,6 +422,50 @@ class MeasurementPage(QWidget):
         run_row = QHBoxLayout()
         self.start_button = QPushButton("Start Measurement")
         self.abort_button = QPushButton("Abort")
+
+        # Primary acquisition controls are intentionally larger and strongly
+        # differentiated because they are the main run/stop actions.
+        self.start_button.setMinimumSize(170, 44)
+        self.abort_button.setMinimumSize(110, 44)
+
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4FAE67;
+                color: white;
+                font-weight: 700;
+                font-size: 14px;
+                border: 1px solid #3F9255;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #449D5B;
+            }
+            QPushButton:disabled {
+                background-color: #A9CFB3;
+                color: #F3F3F3;
+                border-color: #A9CFB3;
+            }
+        """)
+
+        self.abort_button.setStyleSheet("""
+            QPushButton {
+                background-color: #D9534F;
+                color: white;
+                font-weight: 700;
+                font-size: 14px;
+                border: 1px solid #BD4541;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #C74743;
+            }
+            QPushButton:disabled {
+                background-color: #D9A5A3;
+                color: #F3F3F3;
+                border-color: #D9A5A3;
+            }
+        """)
+
         self.abort_button.setEnabled(False)
         self.start_button.clicked.connect(self._start_measurement)
         self.abort_button.clicked.connect(self._abort_measurement)
@@ -339,14 +486,38 @@ class MeasurementPage(QWidget):
 
         retake_row = QHBoxLayout()
         self.retake_button = QPushButton("Retake Selected Point")
+        self.retake_button.setToolTip(
+            "Select a measured point from the map or live table to retake that measurement."
+        )
         self.retake_button.setEnabled(False)
         self.retake_button.clicked.connect(self._retake_selected)
         retake_row.addWidget(self.retake_button)
+
+        self.selected_coordinate = QLabel("Selected: —")
+        self.selected_coordinate.setStyleSheet("color: #555555;")
+        retake_row.addWidget(self.selected_coordinate)
         retake_row.addStretch()
         right_layout.addLayout(retake_row)
 
         self.table = QTableWidget()
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+        # Use a strong selection color so a row selected from either the table
+        # or the mapping grid is immediately obvious.
+        self.table.setStyleSheet("""
+            QTableWidget::item:selected {
+                background-color: #1976D2;
+                color: white;
+            }
+            QTableWidget::item:selected:!active {
+                background-color: #1976D2;
+                color: white;
+            }
+        """)
+
+        self.table.cellClicked.connect(self._table_row_clicked)
         self.table.setMinimumHeight(210)
         right_layout.addWidget(self.table, 2)
 
@@ -393,7 +564,7 @@ class MeasurementPage(QWidget):
         if not name:
             problems.append("Map name cannot be empty.")
         elif INVALID_WINDOWS_CHARS.search(name):
-            problems.append('Map name contains an invalid Windows filename character.')
+            problems.append("Map name contains an invalid Windows filename character.")
 
         if span > self.MAX_MAP_SPAN_MM:
             problems.append(
@@ -404,11 +575,13 @@ class MeasurementPage(QWidget):
         if problems:
             self.validation_label.setText("✕ " + " ".join(problems))
             self.validation_label.setStyleSheet("color: #b33939;")
+            self.validation_label.show()
             self.start_button.setEnabled(False)
             return False
 
-        self.validation_label.setText("✓ Mapping definition is valid.")
-        self.validation_label.setStyleSheet("color: #2769b0;")
+        # Valid setup stays visually quiet.
+        self.validation_label.clear()
+        self.validation_label.hide()
         self.start_button.setEnabled(not self.timer.isActive())
         return True
 
@@ -474,12 +647,17 @@ class MeasurementPage(QWidget):
         if not self._validate_setup():
             return
 
-        for p in self.points:
-            p["status"] = "PENDING"
+        for point in self.points:
+            point["status"] = "PENDING"
 
-        self.data = pd.DataFrame(columns=["X", "Y", "Thickness (nm)", "MSE", "Included"])
+        # Included remains internal for the Results workspace, but it is not
+        # displayed in the Measurement live table.
+        self.data = pd.DataFrame(
+            columns=["X", "Y", "Thickness (nm)", "MSE", "Included"]
+        )
         self.current_sequence_index = 0
         self.selected_point_index = None
+        self.selected_coordinate.setText("Selected: —")
 
         self.setup_group.setEnabled(False)
         self.start_button.setEnabled(False)
@@ -502,15 +680,13 @@ class MeasurementPage(QWidget):
         )
         self.progress.update()
 
-        # Placeholder for CompleteEASE.  The real workflow will wait for the
-        # recipe response instead of this timer.
+        # Placeholder for CompleteEASE.
         self.timer.start(350)
 
     def _finish_simulated_point(self) -> None:
         self.timer.stop()
         point = self.points[self.current_sequence_index]
 
-        # Smooth synthetic map + small noise, useful for testing interpolation.
         x, y = point["X"], point["Y"]
         thickness = 850 + 3.0 * x - 2.0 * y + random.uniform(-6, 6)
         mse = max(0.2, 2.5 + 0.12 * abs(x) + random.uniform(-0.8, 1.4))
@@ -524,7 +700,10 @@ class MeasurementPage(QWidget):
         }])
         self.data = pd.concat([self.data, row], ignore_index=True)
 
-        if self.flag_mse.isChecked() and mse > self.max_mse.value():
+        if (
+            self.quality_dialog.flag_mse.isChecked()
+            and mse > self.quality_dialog.max_mse.value()
+        ):
             point["status"] = "WARNING"
         else:
             point["status"] = "MEASURED"
@@ -557,16 +736,87 @@ class MeasurementPage(QWidget):
         self._validate_setup()
         self.progress.update()
 
+    # ------------------------------------------------------------------
+    # Bidirectional map <-> table selection
+    # ------------------------------------------------------------------
     def _progress_point_clicked(self, index: int) -> None:
-        self.selected_point_index = index
-        point = self.points[index]
+        # Clicking the selected point again clears the selection.
+        if self.selected_point_index == index:
+            self._clear_selection()
+            return
+        self._select_point(index, select_table=True)
+
+    def _table_row_clicked(self, table_row: int, column: int) -> None:
+        del column
+
+        if table_row >= len(self.data):
+            return
+
+        row = self.data.iloc[table_row]
+        point_index = self._point_index_for_coordinate(int(row["X"]), int(row["Y"]))
+        if point_index is None:
+            return
+
+        # Clicking the selected row again clears the selection.
+        if self.selected_point_index == point_index:
+            self._clear_selection()
+            return
+
+        self._select_point(point_index, select_table=False)
+
+    def _clear_selection(self) -> None:
+        """Clear the temporary map/table selection without changing any data."""
+        self.selected_point_index = None
+        self.progress.set_selected(None)
+
+        self.table.blockSignals(True)
+        self.table.clearSelection()
+        self.table.blockSignals(False)
+
+        self.selected_coordinate.setText("Selected: —")
+        self.retake_button.setEnabled(False)
+
+        if self.measurement_status.text() == "COMPLETE":
+            self.current_label.setText(
+                f"Complete: {len(self.points)} points measured."
+            )
+        elif not self.timer.isActive():
+            self.current_label.setText("No measurement selected.")
+
+    def _select_point(self, point_index: int, select_table: bool) -> None:
+        self.selected_point_index = point_index
+        self.progress.set_selected(point_index)
+
+        point = self.points[point_index]
+        x, y = point["X"], point["Y"]
+
+        self.selected_coordinate.setText(f"Selected: X = {x} mm, Y = {y} mm")
         self.current_label.setText(
-            f"Selected: X = {point['X']} mm, Y = {point['Y']} mm, "
+            f"Selected measurement: X = {x} mm, Y = {y} mm, "
             f"status = {point['status']}"
         )
+
         self.retake_button.setEnabled(
-            not self.timer.isActive() and point["status"] in ("MEASURED", "WARNING")
+            not self.timer.isActive()
+            and point["status"] in ("MEASURED", "WARNING")
         )
+
+        if select_table and not self.data.empty:
+            matches = self.data.index[(self.data["X"] == x) & (self.data["Y"] == y)]
+            if len(matches):
+                row_index = int(matches[0])
+                self.table.blockSignals(True)
+                self.table.selectRow(row_index)
+                first_item = self.table.item(row_index, 0)
+                if first_item:
+                    self.table.scrollToItem(first_item)
+                self.table.blockSignals(False)
+
+    def _point_index_for_coordinate(self, x: int, y: int) -> int | None:
+        for index, point in enumerate(self.points):
+            if point["X"] == x and point["Y"] == y:
+                return index
+        return None
 
     def _retake_selected(self) -> None:
         if self.selected_point_index is None:
@@ -575,7 +825,6 @@ class MeasurementPage(QWidget):
         point = self.points[self.selected_point_index]
         x, y = point["X"], point["Y"]
 
-        # Replace the selected simulated result.
         mask = (self.data["X"] == x) & (self.data["Y"] == y)
         thickness = 850 + 3.0 * x - 2.0 * y + random.uniform(-6, 6)
         mse = max(0.2, 2.5 + 0.12 * abs(x) + random.uniform(-0.8, 1.4))
@@ -587,7 +836,10 @@ class MeasurementPage(QWidget):
 
         point["status"] = (
             "WARNING"
-            if self.flag_mse.isChecked() and mse > self.max_mse.value()
+            if (
+                self.quality_dialog.flag_mse.isChecked()
+                and mse > self.quality_dialog.max_mse.value()
+            )
             else "MEASURED"
         )
 
@@ -602,16 +854,21 @@ class MeasurementPage(QWidget):
             self.table.setColumnCount(0)
             return
 
-        columns = list(self.data.columns)
+        # Included is analysis metadata and therefore hidden in Measurement.
+        columns = [column for column in self.data.columns if column != "Included"]
+        display_names = {"X": "X (mm)", "Y": "Y (mm)"}
+
         self.table.setColumnCount(len(columns))
-        self.table.setHorizontalHeaderLabels(columns)
+        self.table.setHorizontalHeaderLabels(
+            [display_names.get(column, column) for column in columns]
+        )
         self.table.setRowCount(len(self.data))
 
         for row_i, (_, row) in enumerate(self.data.iterrows()):
             for col_i, column in enumerate(columns):
                 value = row[column]
                 if isinstance(value, float):
-                    text = f"{value:.4g}"
+                    text = f"{value:.6g}"
                 else:
                     text = str(value)
                 self.table.setItem(row_i, col_i, QTableWidgetItem(text))

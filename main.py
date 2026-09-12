@@ -1,18 +1,14 @@
 """
 ABSTRACT
 --------
-Main entry point for Ellipsometer AutoMapper V1.
+Main entry point for Ellipsometer AutoMapper V1.1.
 
-The application intentionally has only two main working screens:
+The application has two true working tabs:
     Measurement | Results
 
-Help is a pop-out window at the upper-right, following the workflow discussed
-for the user's DAQ-style applications.
-
-This V1 focuses on the final GUI architecture, real TXT-folder parsing, real
-interactive result maps, stage connection/jog controls, and simulated
-acquisition. CompleteEASE recipe communication and permanent experiment-folder
-management will be connected in the next implementation stage.
+They are presented using a real QTabWidget so they visually behave like
+application workspaces rather than pop-out buttons. Help remains an auxiliary
+pop-out control placed at the upper-right corner of the tab bar.
 """
 
 from __future__ import annotations
@@ -20,15 +16,7 @@ from __future__ import annotations
 import sys
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QApplication,
-    QHBoxLayout,
-    QMainWindow,
-    QPushButton,
-    QStackedWidget,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QTabWidget
 
 from help_dialog import HelpDialog
 from measurement_page import MeasurementPage
@@ -39,54 +27,65 @@ class AutoMapperWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Ellipsometer AutoMapper")
-        self.resize(1220, 800)
+        self.resize(1240, 820)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
 
-        # ------------------------------------------------------------------
-        # Top navigation: only Measurement and Results on the left.
-        # Help stays on the upper-right as a pop-out.
-        # ------------------------------------------------------------------
-        header = QHBoxLayout()
-
-        self.measurement_button = QPushButton("Measurement")
-        self.results_button = QPushButton("Results")
-        self.help_button = QPushButton("Help")
-
-        self.measurement_button.setCheckable(True)
-        self.results_button.setCheckable(True)
-        self.measurement_button.setChecked(True)
-
-        header.addWidget(self.measurement_button)
-        header.addWidget(self.results_button)
-        header.addStretch()
-        header.addWidget(self.help_button)
-        root.addLayout(header)
-
-        self.stack = QStackedWidget()
         self.measurement_page = MeasurementPage()
         self.results_page = ResultsPage()
-        self.stack.addWidget(self.measurement_page)
-        self.stack.addWidget(self.results_page)
-        root.addWidget(self.stack, 1)
 
-        self.measurement_button.clicked.connect(lambda: self._show_page(0))
-        self.results_button.clicked.connect(lambda: self._show_page(1))
+        self.tabs.addTab(self.measurement_page, "Measurement")
+        self.tabs.addTab(self.results_page, "Results")
+
+        # Help is deliberately not another workspace tab.
+        self.help_button = QPushButton("Help")
+        self.help_button.setMaximumWidth(80)
         self.help_button.clicked.connect(self._show_help)
+        self.tabs.setCornerWidget(self.help_button, Qt.Corner.TopRightCorner)
 
-        # The current table is shared between acquisition and Results.
+        # The same current DataFrame feeds both acquisition and Results.
         self.measurement_page.dataframe_updated.connect(
             self.results_page.set_dataframe
         )
 
         self.help_dialog = None
 
+        # Explicit colors prevent Windows/Qt dark-palette text from becoming
+        # unreadable on the light scientific-interface backgrounds.
         self.setStyleSheet("""
             QWidget {
                 color: #202020;
                 background-color: #f7f7f7;
+            }
+
+            QTabWidget::pane {
+                border: 1px solid #b8b8b8;
+                background-color: #f7f7f7;
+                top: -1px;
+            }
+
+            QTabBar::tab {
+                color: #202020;
+                background-color: #e4e4e4;
+                border: 1px solid #a9a9a9;
+                border-bottom: none;
+                min-width: 145px;
+                min-height: 34px;
+                padding: 10px 22px;
+                margin-right: 2px;
+                font-size: 15px;
+                font-weight: 600;
+            }
+
+            QTabBar::tab:selected {
+                background-color: white;
+                border-top: 3px solid #3A8DC2;
+                font-weight: 700;
+            }
+
+            QTabBar::tab:!selected {
+                margin-top: 3px;
             }
 
             QGroupBox {
@@ -115,9 +114,8 @@ class AutoMapperWindow(QMainWindow):
                 border-radius: 4px;
             }
 
-            QPushButton:checked {
-                background-color: #42aee8;
-                color: white;
+            QPushButton:hover {
+                background-color: #e2e2e2;
             }
 
             QPushButton:disabled {
@@ -133,6 +131,12 @@ class AutoMapperWindow(QMainWindow):
                 color: #202020;
                 background-color: white;
                 border: 1px solid #bcbcbc;
+                border-radius: 3px;
+                padding-left: 7px;
+            }
+
+            QComboBox {
+                padding-right: 20px;
             }
 
             QTableWidget {
@@ -153,14 +157,10 @@ class AutoMapperWindow(QMainWindow):
             }
         """)
 
-    def _show_page(self, index: int) -> None:
-        self.stack.setCurrentIndex(index)
-        self.measurement_button.setChecked(index == 0)
-        self.results_button.setChecked(index == 1)
-
     def _show_help(self) -> None:
         if self.help_dialog is None:
             self.help_dialog = HelpDialog(self)
+
         self.help_dialog.show()
         self.help_dialog.raise_()
         self.help_dialog.activateWindow()

@@ -1,7 +1,5 @@
 {
-  "temporary_staging_data": "C:\\Path\\To\\Temporary Staging Data",
-  "default_experiment_parent": "C:\\Path\\To\\Mapping Data",
-  "completeease_host": "127.0.0.1",
-  "completeease_port": 4444,
-  "max_map_span_mm": 20
+  "staging_folder": "data/staging",
+  "default_experiment_parent": "data/experiments",
+  "completeease_backend": "simulator"
 }

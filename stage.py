@@ -77,10 +77,27 @@ class StageController:
             self._status = "DISCONNECTED"
 
     def move(self, axis: str, position_mm: float) -> None:
-        self._send(f"MOVE {self._validate_axis(axis)} {position_mm:.6f}")
+        axis = self._validate_axis(axis)
+        with self._lock:
+            self._status = f"MOVING {axis}"
+        self._send(f"MOVE {axis} {position_mm:.6f}")
 
     def move_relative(self, axis: str, distance_mm: float) -> None:
-        self._send(f"MOVEREL {self._validate_axis(axis)} {distance_mm:.6f}")
+        axis = self._validate_axis(axis)
+        with self._lock:
+            self._status = f"MOVING {axis}"
+        self._send(f"MOVEREL {axis} {distance_mm:.6f}")
+
+    def wait_until_idle(self, timeout: float = 30.0) -> None:
+        """Wait until the Arduino reports DONE/IDLE after a motion command."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.last_error:
+                raise RuntimeError(self.last_error)
+            if self.status == "IDLE":
+                return
+            time.sleep(0.02)
+        raise TimeoutError("Stage motion did not finish before the timeout.")
 
     def set_origin(self) -> None:
         self._send("SETORIGIN")

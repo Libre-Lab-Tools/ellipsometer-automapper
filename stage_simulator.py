@@ -56,6 +56,10 @@ class StageSimulator:
         else:
             self._y += float(distance_mm)
 
+    def wait_until_idle(self, timeout: float = 30.0) -> None:
+        del timeout
+        self._require_connection()
+
     def set_origin(self) -> None:
         self._require_connection()
         self._x = 0.0

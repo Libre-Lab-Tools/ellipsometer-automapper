@@ -1,14 +1,14 @@
 """
 ABSTRACT
 --------
-Main entry point for Ellipsometer AutoMapper V1.1.
+Main entry point for Ellipsometer AutoMapper.
 
-The application has two true working tabs:
+The application has two primary workspaces:
     Measurement | Results
 
-They are presented using a real QTabWidget so they visually behave like
-application workspaces rather than pop-out buttons. Help remains an auxiliary
-pop-out control placed at the upper-right corner of the tab bar.
+Machine-specific settings are loaded from config.json. CompleteEASE access is
+selected from the configured backend (simulator or real), but both backends
+expose the same interface to the rest of AutoMapper.
 """
 
 from __future__ import annotations
@@ -16,23 +16,36 @@ from __future__ import annotations
 import sys
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QTabWidget
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QTabWidget
 
+from app_config import AppConfig, load_config
+from completeease import CompleteEASEClient
+from completeease_simulator import CompleteEASESimulator
 from help_dialog import HelpDialog
 from measurement_page import MeasurementPage
 from results_page import ResultsPage
 
 
 class AutoMapperWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, config: AppConfig) -> None:
         super().__init__()
+        self.config = config
+
         self.setWindowTitle("Ellipsometer AutoMapper")
         self.resize(1240, 820)
+
+        if self.config.completeease_backend == "simulator":
+            completeease = CompleteEASESimulator(self.config.staging_folder)
+        else:
+            completeease = CompleteEASEClient()
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.measurement_page = MeasurementPage()
+        self.measurement_page = MeasurementPage(
+            config=self.config,
+            completeease=completeease,
+        )
         self.results_page = ResultsPage()
 
         self.tabs.addTab(self.measurement_page, "Measurement")
@@ -44,9 +57,12 @@ class AutoMapperWindow(QMainWindow):
         self.help_button.clicked.connect(self._show_help)
         self.tabs.setCornerWidget(self.help_button, Qt.Corner.TopRightCorner)
 
-        # The same current DataFrame feeds both acquisition and Results.
+        # Measurement and Results share the same current parsed table.
         self.measurement_page.dataframe_updated.connect(
             self.results_page.set_dataframe
+        )
+        self.measurement_page.experiment_results_folder_updated.connect(
+            self.results_page.set_default_results_folder
         )
 
         self.help_dialog = None
@@ -165,12 +181,22 @@ class AutoMapperWindow(QMainWindow):
         self.help_dialog.raise_()
         self.help_dialog.activateWindow()
 
+    def closeEvent(self, event) -> None:
+        self.measurement_page.shutdown()
+        super().closeEvent(event)
+
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Ellipsometer AutoMapper")
 
-    window = AutoMapperWindow()
+    try:
+        config = load_config()
+    except Exception as exc:
+        QMessageBox.critical(None, "AutoMapper Configuration", str(exc))
+        return 1
+
+    window = AutoMapperWindow(config)
     window.show()
     return app.exec()
 

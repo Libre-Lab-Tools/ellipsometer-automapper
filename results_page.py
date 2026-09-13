@@ -20,7 +20,8 @@ V1.1 supports:
 - global Ignore / Enable for measurements,
 - statistics for all parameters at the same time,
 - stable plot/colorbar width proportions during resizing,
-- Save Plot without the default Matplotlib toolbar,
+- Plot Options popup for Save Current, Save All, and Reset,
+- clean scientific export that omits temporary selection/ignored markers,
 - click the plot title to edit it,
 - click an axis tick label to change X/Y tick spacing.
 
@@ -29,6 +30,8 @@ The Results workspace contains no stage or CompleteEASE acquisition control.
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
 import re
 
 import numpy as np
@@ -126,6 +129,68 @@ class AxisTicksDialog(QDialog):
         return self.y_combo.currentData()
 
 
+class PlotOptionsDialog(QDialog):
+    """Compact home for Results export/reset actions."""
+
+    def __init__(self, results_page, parent=None) -> None:
+        super().__init__(parent)
+        self.results_page = results_page
+        self.setWindowTitle("Plot Options")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "Choose an action for the current Results dataset. Exported plots "
+            "omit temporary selection rings and ignored-point red markers."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._add_action(
+            layout,
+            "Save Current Plot",
+            "Save exactly the currently displayed parameter and plot type.",
+            results_page._save_current_plot,
+        )
+        self._add_action(
+            layout,
+            "Save All Plots",
+            "Export every available parameter and plot type into one new "
+            "timestamped folder.",
+            results_page._save_all_plots,
+        )
+        self._add_action(
+            layout,
+            "Reset Plot Settings",
+            "Enable all valid measurements, clear selection, restore default "
+            "titles/colorbar labels, automatic ticks, and the default plot.",
+            results_page._reset_plot_settings,
+        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add_action(self, layout, title: str, description: str, callback) -> None:
+        row = QHBoxLayout()
+        button = QPushButton(title)
+        button.setMinimumWidth(150)
+        button.clicked.connect(lambda _checked=False, cb=callback: self._run(cb))
+
+        label = QLabel(description)
+        label.setWordWrap(True)
+
+        row.addWidget(button)
+        row.addWidget(label, 1)
+        layout.addLayout(row)
+
+    def _run(self, callback) -> None:
+        self.accept()
+        callback()
+
+
 class ResultsPage(QWidget):
     PLOT_TYPES = [
         "Interpolated Map",
@@ -139,6 +204,7 @@ class ResultsPage(QWidget):
         self.data = pd.DataFrame()
         self.map_data: MapData | None = None
         self.selected_row: int | None = None
+        self.default_results_folder: Path | None = None
 
         self.ax = None
         self.cax = None
@@ -150,9 +216,11 @@ class ResultsPage(QWidget):
         self._colorbar_label_artist = None
         self._custom_colorbar_label: str | None = None
 
-        # The selected-point ring is a temporary GUI artist. It is hidden
-        # automatically when a plot is exported.
+        # Selection and ignored-point markers are analysis-only GUI artists.
+        # They are hidden automatically from exported scientific plots.
         self._selected_artist = None
+        self._ignored_artists: list = []
+        self._plot_render_ok = False
 
         self._x_tick_spacing = None
         self._y_tick_spacing = None
@@ -163,18 +231,51 @@ class ResultsPage(QWidget):
     # Public handoff from Measurement
     # ------------------------------------------------------------------
     def set_dataframe(self, dataframe: pd.DataFrame) -> None:
+        # A new mapping starts by sending an empty DataFrame so old Results do
+        # not remain visible while the first point is being acquired.
         if dataframe is None or dataframe.empty:
+            self.data = pd.DataFrame()
+            self.selected_row = None
+            self.table.clear()
+            self.table.setRowCount(0)
+            self.table.setColumnCount(0)
+            self.stats_table.clear()
+            self.stats_table.setRowCount(0)
+            self.stats_table.setColumnCount(0)
+            self.parameter_combo.blockSignals(True)
+            self.parameter_combo.clear()
+            self.parameter_combo.blockSignals(False)
+            self._redraw()
             return
 
-        self.data = dataframe.copy().reset_index(drop=True)
-        if "Included" not in self.data.columns:
-            self.data["Included"] = True
+        incoming = dataframe.copy().reset_index(drop=True)
+        if "Included" not in incoming.columns:
+            incoming["Included"] = True
 
+        # Preserve any Ignore/Enable choices already made in Results while new
+        # measurement rows arrive from an ongoing map.
+        if not self.data.empty and "Included" in self.data.columns:
+            previous = {
+                (int(row["X"]), int(row["Y"])): bool(row["Included"])
+                for _, row in self.data.iterrows()
+            }
+            for index, row in incoming.iterrows():
+                key = (int(row["X"]), int(row["Y"]))
+                if key in previous:
+                    incoming.at[index, "Included"] = previous[key]
+
+        self.data = incoming
         self.selected_row = None
         self._refresh_table()
         self._refresh_parameter_list()
         self._refresh_statistics()
         self._redraw()
+
+    def set_default_results_folder(self, folder: str) -> None:
+        """Set the preferred export destination for the active experiment."""
+        path = Path(folder)
+        path.mkdir(parents=True, exist_ok=True)
+        self.default_results_folder = path
 
     # ------------------------------------------------------------------
     # UI construction
@@ -254,9 +355,9 @@ class ResultsPage(QWidget):
 
         controls.addStretch()
 
-        self.save_plot = QPushButton("Save Plot")
-        self.save_plot.clicked.connect(self._save_plot)
-        controls.addWidget(self.save_plot)
+        self.plot_options = QPushButton("Plot Options…")
+        self.plot_options.clicked.connect(self._show_plot_options)
+        controls.addWidget(self.plot_options)
 
         right_layout.addLayout(controls)
 
@@ -310,6 +411,7 @@ class ResultsPage(QWidget):
             return
 
         try:
+            self.default_results_folder = None
             self.set_dataframe(parse_txt_folder(folder))
         except Exception as exc:
             QMessageBox.warning(self, "Import TXT Folder", str(exc))
@@ -325,6 +427,7 @@ class ResultsPage(QWidget):
             return
 
         try:
+            self.default_results_folder = None
             self.set_dataframe(load_csv_table(filename))
         except Exception as exc:
             QMessageBox.warning(self, "Import Table", str(exc))
@@ -434,6 +537,8 @@ class ResultsPage(QWidget):
         self.colorbar = None
         self._colorbar_label_artist = None
         self._selected_artist = None
+        self._ignored_artists = []
+        self._plot_render_ok = False
 
         parameter = self.parameter_combo.currentText()
 
@@ -482,6 +587,7 @@ class ResultsPage(QWidget):
                 self._draw_points_with_values(parameter)
             elif plot_type == "Pixel / Cell Map":
                 self._draw_pixel_map(parameter)
+            self._plot_render_ok = True
         except Exception as exc:
             self.ax.clear()
             self.cax.clear()
@@ -576,7 +682,7 @@ class ResultsPage(QWidget):
             )
 
         if not exc.empty:
-            self.ax.scatter(
+            ignored_artist = self.ax.scatter(
                 exc["X"],
                 exc["Y"],
                 marker="x",
@@ -585,6 +691,7 @@ class ResultsPage(QWidget):
                 linewidths=2,
                 zorder=7,
             )
+            self._ignored_artists.append(ignored_artist)
 
         self._set_data_limits()
 
@@ -663,7 +770,7 @@ class ResultsPage(QWidget):
             )
 
         if not exc.empty:
-            self.ax.scatter(
+            ignored_artist = self.ax.scatter(
                 exc["X"],
                 exc["Y"],
                 marker="x",
@@ -672,6 +779,7 @@ class ResultsPage(QWidget):
                 linewidths=2,
                 zorder=9,
             )
+            self._ignored_artists.append(ignored_artist)
 
         self._set_data_limits()
 
@@ -929,35 +1037,180 @@ class ResultsPage(QWidget):
             self._y_tick_spacing = dialog.y_spacing
             self._redraw()
 
-    def _save_plot(self) -> None:
-        if self.data.empty or not self.parameter_combo.currentText():
-            QMessageBox.information(self, "Save Plot", "No plot is available to save.")
+    def _show_plot_options(self) -> None:
+        dialog = PlotOptionsDialog(self, self)
+        dialog.exec()
+
+    def _reset_plot_settings(self) -> None:
+        """Restore the current dataset to its default Results presentation."""
+        if not self.data.empty and "Included" in self.data.columns:
+            self.data.loc[:, "Included"] = True
+
+        self.selected_row = None
+        self._custom_title = None
+        self._custom_colorbar_label = None
+        self._x_tick_spacing = None
+        self._y_tick_spacing = None
+
+        self.table.blockSignals(True)
+        self.table.clearSelection()
+        self.table.blockSignals(False)
+
+        parameters = available_parameters(self.data)
+        self.parameter_combo.blockSignals(True)
+        if parameters:
+            self.parameter_combo.setCurrentText(parameters[0])
+        self.parameter_combo.blockSignals(False)
+
+        self.plot_type_combo.blockSignals(True)
+        self.plot_type_combo.setCurrentText(self.PLOT_TYPES[0])
+        self.plot_type_combo.blockSignals(False)
+
+        self._refresh_table()
+        self._refresh_statistics()
+        self._redraw()
+
+    def _save_current_plot(self) -> None:
+        if (
+            self.data.empty
+            or not self.parameter_combo.currentText()
+            or not self._plot_render_ok
+        ):
+            QMessageBox.information(
+                self, "Save Current Plot", "No valid plot is available to save."
+            )
             return
 
         parameter = self.parameter_combo.currentText()
         plot_type = self.plot_type_combo.currentText()
+        suggested = self._plot_filename(parameter, plot_type)
 
-        safe_parameter = re.sub(r"[^A-Za-z0-9_-]+", "_", parameter).strip("_")
-        safe_type = re.sub(r"[^A-Za-z0-9_-]+", "_", plot_type).strip("_")
-        suggested = f"{safe_parameter}_{safe_type}.png"
+        if self.default_results_folder is not None:
+            suggested_path = str(self.default_results_folder / suggested)
+        else:
+            suggested_path = suggested
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Plot",
-            suggested,
+            "Save Current Plot",
+            suggested_path,
             "PNG image (*.png);;PDF (*.pdf);;SVG (*.svg);;All files (*.*)",
         )
 
         if filename:
-            # The selection ring is a GUI-only aid and should never appear in
-            # exported scientific figures.
-            selected_artist = self._selected_artist
-            if selected_artist is not None:
-                selected_artist.set_visible(False)
+            self._save_figure_clean(Path(filename))
 
-            try:
-                self.figure.savefig(filename, dpi=300, bbox_inches="tight")
-            finally:
-                if selected_artist is not None:
-                    selected_artist.set_visible(True)
-                    self.canvas.draw_idle()
+    def _save_all_plots(self) -> None:
+        if self.data.empty or not available_parameters(self.data):
+            QMessageBox.information(
+                self, "Save All Plots", "No mapping data are available to export."
+            )
+            return
+
+        start_folder = (
+            str(self.default_results_folder)
+            if self.default_results_folder is not None
+            else ""
+        )
+        parent = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Parent Folder for Plot Export",
+            start_folder,
+        )
+        if not parent:
+            return
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_folder = Path(parent) / f"plots_{stamp}"
+        suffix = 1
+        while export_folder.exists():
+            export_folder = Path(parent) / f"plots_{stamp}_{suffix:02d}"
+            suffix += 1
+        export_folder.mkdir(parents=True)
+
+        # Preserve the interactive workspace exactly as the user left it.
+        original_parameter = self.parameter_combo.currentText()
+        original_plot_type = self.plot_type_combo.currentText()
+        original_title = self._custom_title
+        original_colorbar = self._custom_colorbar_label
+        original_selected = self.selected_row
+
+        saved = 0
+        skipped = 0
+
+        try:
+            self.selected_row = None
+
+            for parameter in available_parameters(self.data):
+                self.parameter_combo.blockSignals(True)
+                self.parameter_combo.setCurrentText(parameter)
+                self.parameter_combo.blockSignals(False)
+
+                # Custom title/colorbar editing belongs to the currently shown
+                # parameter. Other parameters use their clean defaults.
+                if parameter == original_parameter:
+                    self._custom_title = original_title
+                    self._custom_colorbar_label = original_colorbar
+                else:
+                    self._custom_title = None
+                    self._custom_colorbar_label = None
+
+                for plot_type in self.PLOT_TYPES:
+                    self.plot_type_combo.blockSignals(True)
+                    self.plot_type_combo.setCurrentText(plot_type)
+                    self.plot_type_combo.blockSignals(False)
+                    self._redraw()
+
+                    if not self._plot_render_ok:
+                        skipped += 1
+                        continue
+
+                    path = export_folder / self._plot_filename(parameter, plot_type)
+                    self._save_figure_clean(path)
+                    saved += 1
+        finally:
+            self.parameter_combo.blockSignals(True)
+            self.parameter_combo.setCurrentText(original_parameter)
+            self.parameter_combo.blockSignals(False)
+
+            self.plot_type_combo.blockSignals(True)
+            self.plot_type_combo.setCurrentText(original_plot_type)
+            self.plot_type_combo.blockSignals(False)
+
+            self._custom_title = original_title
+            self._custom_colorbar_label = original_colorbar
+            self.selected_row = original_selected
+            self._redraw()
+
+            if original_selected is not None and original_selected < len(self.data):
+                self.table.selectRow(original_selected)
+
+        message = f"Saved {saved} plots to:\n{export_folder}"
+        if skipped:
+            message += f"\n\nSkipped {skipped} plot(s) that could not be generated."
+        QMessageBox.information(self, "Save All Plots", message)
+
+    def _save_figure_clean(self, path: Path) -> None:
+        """Save a scientific figure without analysis-only selection markers."""
+        artists = []
+        if self._selected_artist is not None:
+            artists.append(self._selected_artist)
+        artists.extend(self._ignored_artists)
+
+        visibility = []
+        for artist in artists:
+            visibility.append((artist, artist.get_visible()))
+            artist.set_visible(False)
+
+        try:
+            self.figure.savefig(path, dpi=300, bbox_inches="tight")
+        finally:
+            for artist, was_visible in visibility:
+                artist.set_visible(was_visible)
+            self.canvas.draw_idle()
+
+    @staticmethod
+    def _plot_filename(parameter: str, plot_type: str) -> str:
+        safe_parameter = re.sub(r"[^A-Za-z0-9_-]+", "_", parameter).strip("_")
+        safe_type = re.sub(r"[^A-Za-z0-9_-]+", "_", plot_type).strip("_")
+        return f"{safe_parameter}_{safe_type}.png"

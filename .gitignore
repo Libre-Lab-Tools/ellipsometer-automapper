@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 config.json
+data/staging/*
+!data/staging/.gitkeep
+data/experiments/*
+!data/experiments/.gitkeep

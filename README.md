@@ -134,7 +134,7 @@ This revision applies the first round of hands-on GUI feedback.
 - **Parameter Statistics** shows all numeric parameters simultaneously as columns.
 - Plot and colorbar use a fixed width ratio when the Results splitter is resized.
 - The default Matplotlib toolbar is removed.
-- `Save Plot` is the only permanent plot toolbar action.
+- `Plot Options…` contains Save Current Plot, Save All Plots, and Reset Plot Settings.
 - Plot type selector supports:
   - Interpolated Map
   - Measured Points + Values
@@ -159,3 +159,105 @@ This revision applies the first round of hands-on GUI feedback.
 - Browse is smaller and separated from the save-location field.
 - Measurement Quality is a compact button.
 - Measurement and Results tabs are larger and styled as primary application workspaces.
+
+
+## V1.5 interaction revision
+
+### Measurement
+- Jog arrows are larger and visually heavier.
+- Clicking an already-selected map point deselects it.
+- Clicking an already-selected live-table row deselects it.
+
+### Results
+- Ignore / Enable is now a small secondary button beside the selected-point information.
+- Mapping Data uses the same strong blue full-row selection as Measurement.
+- Clicking an already-selected plot point or table row deselects it.
+- Parameter selector is wider for long CompleteEASE parameter names.
+- Interpolated maps end exactly at the outer measurement coordinates.
+- Colorbar labels can be edited by clicking the colorbar label.
+- Exported figures omit the temporary blue selected-point ring.
+
+## V1.6 - real file-pipeline simulator
+
+This revision replaces the old in-memory fake Thickness/MSE generator with a
+black-box CompleteEASE simulator that uses the same interface planned for the
+real `completeease.py` driver.
+
+### Portable configuration
+
+`config.json` contains machine-specific settings. Relative paths are resolved
+from the folder containing the AutoMapper code, so the default development
+configuration works anywhere the project folder is copied:
+
+```json
+{
+  "staging_folder": "data/staging",
+  "default_experiment_parent": "data/experiments",
+  "completeease_backend": "simulator"
+}
+```
+
+With the project located at:
+
+`C:\Users\raulm\Desktop\LibreLab Tools\Ellipsometer AutoMapper`
+
+the default folders therefore resolve to:
+
+- `C:\Users\raulm\Desktop\LibreLab Tools\Ellipsometer AutoMapper\data\staging`
+- `C:\Users\raulm\Desktop\LibreLab Tools\Ellipsometer AutoMapper\data\experiments`
+
+On the ellipsometer computer, `staging_folder` can instead be changed to the
+actual folder already configured inside the CompleteEASE recipes, and
+`completeease_backend` can be changed from `simulator` to `real`.
+
+### Experiment folders
+
+The Save Location field is a parent directory only. Each Start Measurement
+creates a unique folder:
+
+`YYYYMMDD_HHMMSS_OptionalMapName`
+
+with:
+
+- `raw_data/`
+- `results/`
+- `mapping_results.csv`
+
+The map name is optional because the timestamp guarantees uniqueness.
+
+### CompleteEASE simulator
+
+The simulator exposes:
+
+- `connect()`
+- `disconnect()`
+- `list_recipes()`
+- `run_recipe(recipe_name, file_name)`
+
+It returns three fake recipes and writes realistic CompleteEASE-style TXT files
+plus dummy SE files into the configured staging folder. AutoMapper then copies
+the exact expected files into the current experiment `raw_data` folder, parses
+the permanent folder, and updates Measurement and Results from the real parser.
+
+### Point failure behavior
+
+A point is successful only when the requested recipe produces a new readable
+TXT file with the expected coordinate filename. If no usable TXT is produced,
+the point is marked Failed (red X) in the Measurement progress map and mapping
+continues. Failed points have no Results-table row and no Results-plot marker. A
+later successful retake creates the normal data row.
+
+A CompleteEASE communication failure is different: it stops the mapping
+sequence and notifies the user. Abort also stops the mapping sequence, but does
+not attempt to cancel the recipe currently running.
+
+
+## V1.8 Results/export and failure-simulation revision
+
+- The simulator deliberately makes acquisition #3 produce no TXT and #5 produce an unreadable TXT on each fresh application run. Later calls succeed, so failed points can be retaken.
+- Failed/missing measurements remain visible only in the Measurement progress map. Results contains only real readable measurements.
+- Ignored valid points remain red X markers while analyzing Results, but are omitted from exported figures.
+- `Plot Options…` replaces the single Save Plot button. It contains Save Current Plot, Save All Plots, and Reset Plot Settings.
+- Save All creates a timestamped `plots_YYYYMMDD_HHMMSS` folder inside the user-selected parent and exports every available parameter/plot-type combination.
+- Reset Plot Settings enables all valid points and restores default title, colorbar title, automatic ticks, default parameter/plot, and clears selection.
+- For live AutoMapper experiments, the experiment `results` folder is used as the preferred plot-export destination.

@@ -52,6 +52,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app_config import AppConfig
+from completeease import CompleteEASEClient
+from completeease_simulator import CompleteEASESimulator
 from mapping_runner import (
     MappingRunner,
     PointAcquisitionThread,
@@ -476,15 +478,15 @@ class MeasurementPage(QWidget):
     SPACING_OPTIONS = [1, 2, 3, 4, 5]
     MAX_MAP_SPAN_MM = 20
 
-    def __init__(self, config: AppConfig, completeease, parent=None) -> None:
+    def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
 
         self.config = config
-        self.completeease = completeease
-        self.mapping_runner = MappingRunner(
-            completeease=self.completeease,
-            staging_folder=self.config.staging_folder,
-        )
+
+        # Measurement backend is selected at runtime from the GUI. Both the
+        # simulator and real CompleteEASE driver expose the same public API.
+        self.completeease = None
+        self.mapping_runner = None
 
         self.stage = None
         self.points: list[dict] = []
@@ -507,11 +509,6 @@ class MeasurementPage(QWidget):
         self._refresh_ports()
         self._rebuild_grid()
 
-        # Initialize the CompleteEASE black box after the window is created so
-        # connection problems can be reported through the GUI rather than at
-        # import time.
-        QTimer.singleShot(0, self._initialize_completeease)
-
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -530,8 +527,28 @@ class MeasurementPage(QWidget):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(9)
 
+        source_row = QHBoxLayout()
+        source_row.setSpacing(10)
+
+        self.completeease_source = QComboBox()
+        self.completeease_source.addItems(["SIMULATOR", "CompleteEASE"])
+        self.completeease_source.setCurrentText("SIMULATOR")
+        self.completeease_source.currentTextChanged.connect(
+            self._completeease_source_changed
+        )
+
+        self.completeease_connect_button = QPushButton("Connect")
+        self.completeease_connect_button.setMaximumWidth(100)
+        self.completeease_connect_button.clicked.connect(
+            self._toggle_completeease_connection
+        )
+
+        source_row.addWidget(self.completeease_source, 1)
+        source_row.addWidget(self.completeease_connect_button)
+        form.addRow("Measurement source:", source_row)
+
         self.recipe_combo = QComboBox()
-        self.recipe_combo.addItem("Connecting to CompleteEASE…")
+        self.recipe_combo.addItem("Connect measurement source to load recipes")
         self.recipe_combo.setEnabled(False)
         self.recipe_combo.currentIndexChanged.connect(self._validate_setup)
         form.addRow("Recipe:", self.recipe_combo)
@@ -966,7 +983,11 @@ class MeasurementPage(QWidget):
         # Valid setup stays visually quiet.
         self.validation_label.clear()
         self.validation_label.hide()
-        self.start_button.setEnabled(not self.mapping_active and self.worker is None)
+        self.start_button.setEnabled(
+            not self.mapping_active
+            and self.worker is None
+            and self._completeease_ready
+        )
         return True
 
     def _choose_save_location(self) -> None:
@@ -977,31 +998,110 @@ class MeasurementPage(QWidget):
     # ------------------------------------------------------------------
     # CompleteEASE / simulator black-box connection
     # ------------------------------------------------------------------
-    def _initialize_completeease(self) -> None:
-        try:
-            if not self.completeease.connected:
-                self.completeease.connect()
-            recipes = self.completeease.list_recipes()
-        except Exception as exc:
-            self._completeease_ready = False
-            self.recipe_combo.clear()
-            self.recipe_combo.addItem("CompleteEASE unavailable")
-            self.recipe_combo.setEnabled(False)
-            self._validate_setup()
-            QMessageBox.warning(self, "CompleteEASE", str(exc))
+    def _completeease_source_changed(self) -> None:
+        """Refresh the disconnected placeholder when the backend is changed."""
+        if self.completeease is not None and self.completeease.connected:
             return
 
+        self.recipe_combo.clear()
+        self.recipe_combo.addItem("Connect measurement source to load recipes")
+        self.recipe_combo.setEnabled(False)
+        self._completeease_ready = False
+        self._validate_setup()
+
+    def _toggle_completeease_connection(self) -> None:
+        """Connect/disconnect the selected measurement backend."""
+        if self.completeease is not None and self.completeease.connected:
+            try:
+                self.completeease.disconnect()
+            finally:
+                self.completeease = None
+                self.mapping_runner = None
+                self._completeease_ready = False
+                self.completeease_connect_button.setText("Connect")
+                self.completeease_source.setEnabled(True)
+                self.recipe_combo.clear()
+                self.recipe_combo.addItem(
+                    "Connect measurement source to load recipes"
+                )
+                self.recipe_combo.setEnabled(False)
+                self._validate_setup()
+            return
+
+        source = self.completeease_source.currentText()
+        if source == "SIMULATOR":
+            backend = CompleteEASESimulator(self.config.staging_folder)
+        else:
+            backend = CompleteEASEClient()
+
+        try:
+            backend.connect()
+            recipes = backend.list_recipes()
+            if not recipes:
+                raise RuntimeError("No CompleteEASE recipes were returned.")
+        except Exception as exc:
+            try:
+                backend.disconnect()
+            except Exception:
+                pass
+            self.completeease = None
+            self.mapping_runner = None
+            self._completeease_ready = False
+            self.recipe_combo.clear()
+            self.recipe_combo.addItem("Measurement source unavailable")
+            self.recipe_combo.setEnabled(False)
+            self.completeease_connect_button.setText("Connect")
+            self.completeease_source.setEnabled(True)
+            self._validate_setup()
+            QMessageBox.warning(self, "Measurement Source", str(exc))
+            return
+
+        self.completeease = backend
+        self.mapping_runner = MappingRunner(
+            completeease=self.completeease,
+            staging_folder=self.config.staging_folder,
+        )
         self._completeease_ready = True
+        self.completeease_connect_button.setText("Disconnect")
+        self.completeease_source.setEnabled(False)
         self.recipe_combo.clear()
         self.recipe_combo.addItems(recipes)
         self.recipe_combo.setEnabled(True)
         self._validate_setup()
 
     def _ensure_completeease_connected(self) -> bool:
-        if self.completeease.connected and self._completeease_ready:
+        if (
+            self.completeease is not None
+            and self.completeease.connected
+            and self._completeease_ready
+            and self.mapping_runner is not None
+        ):
             return True
-        self._initialize_completeease()
-        return self._completeease_ready
+
+        QMessageBox.information(
+            self,
+            "Measurement Source",
+            "Connect the CompleteEASE simulator or real CompleteEASE before "
+            "starting the measurement.",
+        )
+        return False
+
+    def _mark_completeease_disconnected(self) -> None:
+        """Update connection controls after a fatal communication failure."""
+        try:
+            if self.completeease is not None and self.completeease.connected:
+                self.completeease.disconnect()
+        except Exception:
+            pass
+
+        self.completeease = None
+        self.mapping_runner = None
+        self._completeease_ready = False
+        self.completeease_connect_button.setText("Connect")
+        self.completeease_source.setEnabled(True)
+        self.recipe_combo.clear()
+        self.recipe_combo.addItem("Connect measurement source to load recipes")
+        self.recipe_combo.setEnabled(False)
 
     # ------------------------------------------------------------------
     # Stage controls
@@ -1200,7 +1300,7 @@ class MeasurementPage(QWidget):
         self._launch_point_worker(self.current_sequence_index, retake=False)
 
     def _launch_point_worker(self, point_index: int, retake: bool) -> None:
-        if self.current_experiment is None:
+        if self.current_experiment is None or self.mapping_runner is None:
             return
 
         point = self.points[point_index]
@@ -1368,7 +1468,7 @@ class MeasurementPage(QWidget):
                 point["status"] = "PENDING"
 
         self.mapping_active = False
-        self._completeease_ready = False
+        self._mark_completeease_disconnected()
         self.measurement_status.setText("ERROR")
         self.current_label.setText("CompleteEASE communication error. Mapping stopped.")
         self.setup_group.setEnabled(True)
@@ -1564,7 +1664,7 @@ class MeasurementPage(QWidget):
         except Exception:
             pass
         try:
-            if self.completeease.connected:
+            if self.completeease is not None and self.completeease.connected:
                 self.completeease.disconnect()
         except Exception:
             pass

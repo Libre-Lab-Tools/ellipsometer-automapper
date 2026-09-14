@@ -1,5 +1,4 @@
 {
   "staging_folder": "data/staging",
-  "default_experiment_parent": "data/experiments",
-  "completeease_backend": "simulator"
+  "default_experiment_parent": "data/experiments"
 }

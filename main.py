@@ -6,9 +6,9 @@ Main entry point for Ellipsometer AutoMapper.
 The application has two primary workspaces:
     Measurement | Results
 
-Machine-specific settings are loaded from config.json. CompleteEASE access is
-selected from the configured backend (simulator or real), but both backends
-expose the same interface to the rest of AutoMapper.
+Machine-specific folder settings are loaded from config.json. The Measurement
+workspace lets the user connect either to the CompleteEASE simulator or the
+real CompleteEASE TCP driver at runtime.
 """
 
 from __future__ import annotations
@@ -19,8 +19,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QTabWidget
 
 from app_config import AppConfig, load_config
-from completeease import CompleteEASEClient
-from completeease_simulator import CompleteEASESimulator
 from help_dialog import HelpDialog
 from measurement_page import MeasurementPage
 from results_page import ResultsPage
@@ -34,18 +32,10 @@ class AutoMapperWindow(QMainWindow):
         self.setWindowTitle("Ellipsometer AutoMapper")
         self.resize(1240, 820)
 
-        if self.config.completeease_backend == "simulator":
-            completeease = CompleteEASESimulator(self.config.staging_folder)
-        else:
-            completeease = CompleteEASEClient()
-
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.measurement_page = MeasurementPage(
-            config=self.config,
-            completeease=completeease,
-        )
+        self.measurement_page = MeasurementPage(config=self.config)
         self.results_page = ResultsPage()
 
         self.tabs.addTab(self.measurement_page, "Measurement")

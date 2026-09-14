@@ -3,9 +3,9 @@ ABSTRACT
 --------
 Portable machine configuration for Ellipsometer AutoMapper.
 
-Paths in config.json may be absolute or relative. Relative paths are resolved
-from the AutoMapper project folder, which lets a development copy run on any
-computer without editing hard-coded Windows paths.
+Only computer-specific folder locations live in config.json. Paths may be
+absolute or relative. Relative paths are resolved from the AutoMapper project
+folder so a development copy can run on any computer without hard-coded paths.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 class AppConfig:
     staging_folder: Path
     default_experiment_parent: Path
-    completeease_backend: str = "simulator"
 
 
 def _resolve_path(value: str) -> Path:
@@ -47,12 +46,6 @@ def load_config(path: str | Path = CONFIG_PATH) -> AppConfig:
 
     staging = _resolve_path(raw["staging_folder"])
     parent = _resolve_path(raw["default_experiment_parent"])
-    backend = str(raw.get("completeease_backend", "simulator")).strip().lower()
-
-    if backend not in {"simulator", "real"}:
-        raise ValueError(
-            "completeease_backend must be either 'simulator' or 'real'."
-        )
 
     staging.mkdir(parents=True, exist_ok=True)
     parent.mkdir(parents=True, exist_ok=True)
@@ -60,5 +53,4 @@ def load_config(path: str | Path = CONFIG_PATH) -> AppConfig:
     return AppConfig(
         staging_folder=staging,
         default_experiment_parent=parent,
-        completeease_backend=backend,
     )

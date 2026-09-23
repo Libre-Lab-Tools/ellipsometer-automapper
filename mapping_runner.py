@@ -7,9 +7,11 @@ The runner knows the CompleteEASE staging folder and one experiment's permanent
 raw_data folder. For one requested coordinate it:
 1. optionally moves the stage,
 2. calls run_recipe(recipe, file_name),
-3. verifies that a new readable TXT result was produced,
-4. copies the new TXT and SE files into the experiment raw_data folder,
-5. reparses the permanent raw_data folder into the current DataFrame.
+3. detects newly produced SE/TXT files,
+4. preserves those raw files before interpreting them,
+5. treats a new SE as evidence that a measurement was acquired,
+6. independently attempts to parse the copied TXT for Results,
+7. reparses usable permanent raw_data into the current DataFrame.
 
 It does not know about GUI widgets or plotting.
 """
@@ -40,6 +42,7 @@ class PointResult:
     success: bool
     dataframe: pd.DataFrame | None = None
     reason: str = ""
+    measurement_acquired: bool = False
 
 
 def create_experiment_folder(parent: str | Path, map_name: str = "") -> ExperimentPaths:
@@ -79,7 +82,7 @@ class MappingRunner:
         x: int | None = None,
         y: int | None = None,
     ) -> PointResult:
-        """Acquire one point and return the newly reparsed experiment table."""
+        """Acquire one point, preserve raw files, then interpret Results data."""
         txt_source = self.staging_folder / f"{file_name}.txt"
         se_source = self.staging_folder / f"{file_name}.SE"
 
@@ -101,32 +104,89 @@ class MappingRunner:
         # fatal error understood by the Measurement workspace.
         self.completeease.run_recipe(recipe_name, file_name)
 
-        # Staging is never cleared. Instead, require the expected TXT to be new
-        # or overwritten by this request so an old staging file cannot be used
-        # after a failed measurement.
         txt_after = self._signature(txt_source)
-        if txt_after is None or txt_after == txt_before:
-            return PointResult(False, reason="No new TXT result was produced.")
+        se_after = self._signature(se_source)
+        new_txt = txt_after is not None and txt_after != txt_before
+        new_se = se_after is not None and se_after != se_before
+
+        txt_dest = experiment.raw_data / txt_source.name
+        se_dest = experiment.raw_data / se_source.name
+
+        # If this coordinate already has permanent raw files, first preserve
+        # the new attempt in a dedicated folder. A failed remeasurement must
+        # never destroy the previously valid canonical pair.
+        repeated = txt_dest.exists() or se_dest.exists()
+        attempt_dir: Path | None = None
+        if repeated and (new_txt or new_se):
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            attempt_dir = experiment.raw_data / "repeated_attempts" / f"{stamp}_{file_name}"
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+
+        if attempt_dir is None:
+            copied_txt = txt_dest if new_txt else None
+            copied_se = se_dest if new_se else None
+        else:
+            copied_txt = attempt_dir / txt_source.name if new_txt else None
+            copied_se = attempt_dir / se_source.name if new_se else None
+
+        # Preserve newly produced raw files before attempting any parsing.
+        if new_se and copied_se is not None:
+            shutil.copy2(se_source, copied_se)
+        if new_txt and copied_txt is not None:
+            shutil.copy2(txt_source, copied_txt)
+
+        # The SE file represents the acquired ellipsometry measurement. Without
+        # a new SE, the point remains "no data" even if another export appeared.
+        if not new_se:
+            return PointResult(
+                False,
+                reason="No new SE measurement file was produced.",
+                measurement_acquired=False,
+            )
+
+        # A measurement exists and has already been preserved. Results are a
+        # separate layer: missing or unreadable TXT means the point has no usable
+        # fitted result, but the SE data remain available for later reanalysis.
+        if not new_txt or copied_txt is None:
+            return PointResult(
+                False,
+                reason="Measurement was saved, but no new TXT result was produced.",
+                measurement_acquired=True,
+            )
 
         try:
-            parameters = parse_completeease_txt(txt_source)
+            parameters = parse_completeease_txt(copied_txt)
         except Exception as exc:
-            return PointResult(False, reason=f"TXT result could not be read: {exc}")
+            return PointResult(
+                False,
+                reason=f"Measurement was saved, but the TXT result could not be read: {exc}",
+                measurement_acquired=True,
+            )
 
         if not parameters:
-            return PointResult(False, reason="TXT result contains no readable parameters.")
+            return PointResult(
+                False,
+                reason="Measurement was saved, but the TXT result contains no readable parameters.",
+                measurement_acquired=True,
+            )
 
-        shutil.copy2(txt_source, experiment.raw_data / txt_source.name)
+        # Successful repeated acquisition: promote the preserved attempt to the
+        # canonical coordinate filenames used by the live Results dataset.
+        if attempt_dir is not None:
+            if copied_se is not None:
+                shutil.copy2(copied_se, se_dest)
+            shutil.copy2(copied_txt, txt_dest)
 
-        # The TXT is the success criterion. Copy SE when this request produced
-        # one, but never copy an unchanged stale SE file.
-        se_after = self._signature(se_source)
-        if se_after is not None and se_after != se_before:
-            shutil.copy2(se_source, experiment.raw_data / se_source.name)
-
-        dataframe = parse_txt_folder(experiment.raw_data)
+        dataframe = parse_txt_folder(
+            experiment.raw_data,
+            require_matching_se=True,
+        )
         dataframe.to_csv(experiment.root / "mapping_results.csv", index=False)
-        return PointResult(True, dataframe=dataframe)
+        return PointResult(
+            True,
+            dataframe=dataframe,
+            measurement_acquired=True,
+        )
 
     @staticmethod
     def _signature(path: Path) -> tuple[int, int] | None:

@@ -42,11 +42,23 @@ class CompleteEASESimulator:
         self.acquisition_delay = float(acquisition_delay)
         self._connected = False
 
-        # Development-only failure injection. On a fresh application run,
-        # simulated acquisition #3 produces no TXT result and acquisition #5
-        # produces an unreadable TXT result. All later calls succeed, so either
-        # failed point can be retaken successfully after the map finishes.
+        # Development-only repeating failure cycle:
+        #   1 success
+        #   2 success
+        #   3 SE only / no TXT
+        #   4 success
+        #   5 success
+        #   6 SE + unreadable TXT
+        #   7 success
+        #   8 success
+        #   9 no files
+        # then repeat from 1.
+        #
+        # Coordinates that fail because of this artificial cycle are remembered;
+        # the next acquisition of that same coordinate is forced to succeed so
+        # retake/recovery behavior can be tested naturally.
         self._run_count = 0
+        self._failed_coordinates: set[str] = set()
 
         self.staging_folder.mkdir(parents=True, exist_ok=True)
 
@@ -55,6 +67,10 @@ class CompleteEASESimulator:
         return self._connected
 
     def connect(self) -> None:
+        # Reconnecting starts a fresh deterministic simulator test cycle.
+        if not self._connected:
+            self._run_count = 0
+            self._failed_coordinates.clear()
         self._connected = True
 
     def disconnect(self) -> None:
@@ -88,24 +104,45 @@ class CompleteEASESimulator:
         y = int(match.group("y"))
 
         time.sleep(self.acquisition_delay)
+
+        # Artificially failed coordinates succeed on their next acquisition.
+        # The retry does not consume a cycle position, so the repeating failure
+        # pattern remains predictable for subsequent new points.
+        if file_name in self._failed_coordinates:
+            self._failed_coordinates.remove(file_name)
+            self._write_se(file_name, recipe_name, x, y)
+            values = self._simulated_values(recipe_name, x, y)
+            self._write_txt(file_name, recipe_name, values)
+            return "; ".join(
+                f"{name}={value:.6g}" for name, value in values.items()
+            )
+
         self._run_count += 1
+        cycle_position = ((self._run_count - 1) % 9) + 1
 
-        # Always create the dummy SE file. The TXT file is the AutoMapper
-        # success criterion, just as it will be with the real recipe workflow.
-        self._write_se(file_name, recipe_name, x, y)
+        # Position 3: a measurement file exists, but no results TXT is produced.
+        # AutoMapper should preserve the SE and show the point as results-unusable.
+        if cycle_position == 3:
+            self._write_se(file_name, recipe_name, x, y)
+            self._failed_coordinates.add(file_name)
+            return "SIMULATED_SE_ONLY_NO_TXT"
 
-        # Acquisition #3 simulates a point where CompleteEASE finishes but no
-        # usable results TXT is produced (for example, alignment failed).
-        if self._run_count == 3:
-            return "SIMULATED_NO_TXT_RESULT"
-
-        # Acquisition #5 simulates a result file that exists but contains no
-        # readable fitted parameters. MappingRunner should reject it and move
-        # on to the next point.
-        if self._run_count == 5:
+        # Position 6: both files exist, but the TXT has no readable parameter
+        # section. AutoMapper should preserve both raw files and reject Results.
+        if cycle_position == 6:
+            self._write_se(file_name, recipe_name, x, y)
             self._write_corrupt_txt(file_name, recipe_name)
+            self._failed_coordinates.add(file_name)
             return "SIMULATED_UNREADABLE_TXT_RESULT"
 
+        # Position 9: no new SE or TXT is written at all. AutoMapper should treat
+        # this as no acquired measurement and leave the point gray.
+        if cycle_position == 9:
+            self._failed_coordinates.add(file_name)
+            return "SIMULATED_NO_FILES"
+
+        # All other cycle positions are successful.
+        self._write_se(file_name, recipe_name, x, y)
         values = self._simulated_values(recipe_name, x, y)
         self._write_txt(file_name, recipe_name, values)
 

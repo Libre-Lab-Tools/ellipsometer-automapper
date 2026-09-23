@@ -68,7 +68,8 @@ class CompleteEASEClient:
             sock.close()
             raise CompleteEASECommunicationError(
                 f"Could not connect to CompleteEASE at "
-                f"{self.host}:{self.port}: {exc}"
+                f"{self.host}:{self.port}: {exc}. "
+                "Make sure CompleteEASE is open and running on this computer."
             ) from exc
 
         # A recipe may take much longer than the initial TCP connection.
@@ -155,13 +156,15 @@ class CompleteEASEClient:
             self.disconnect()
             raise CompleteEASECommunicationError(
                 f"CompleteEASE communication failed while sending "
-                f"{command!r}: {exc}"
+                f"{command!r}: {exc}. "
+                "Make sure CompleteEASE is still open and running on this computer."
             ) from exc
 
         if not data:
             self.disconnect()
             raise CompleteEASECommunicationError(
-                "CompleteEASE closed the connection without returning a reply."
+                "CompleteEASE closed the connection without returning a reply. "
+                "Make sure CompleteEASE is still open and running on this computer."
             )
 
         # latin-1 safely preserves the byte values returned by the legacy

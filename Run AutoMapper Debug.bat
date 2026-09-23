@@ -1,5 +1,4 @@
 @echo off
-setlocal
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
@@ -11,12 +10,12 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+echo Starting Ellipsometer AutoMapper in DEBUG mode...
+echo.
 ".venv\Scripts\python.exe" main.py
 
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo AutoMapper closed because of an error.
-    echo The error message should be visible above.
-    echo.
-    pause
-)
+echo.
+echo AutoMapper has closed.
+echo If an error occurred, review the messages above.
+echo.
+pause

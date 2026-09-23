@@ -86,9 +86,17 @@ def parse_completeease_txt(path: str | Path) -> dict[str, float]:
     return parameters
 
 
-def parse_txt_folder(folder: str | Path) -> pd.DataFrame:
+def parse_txt_folder(
+    folder: str | Path,
+    *,
+    require_matching_se: bool = False,
+) -> pd.DataFrame:
     """
-    Parse every supported CompleteEASE TXT file in a folder.
+    Parse every usable supported CompleteEASE TXT file in a folder.
+
+    When require_matching_se=True, only TXT files with a same-name .SE file
+    are considered. AutoMapper uses that mode for live experiments so a
+    standalone TXT export cannot be mistaken for an acquired measurement.
 
     Returns
     -------
@@ -110,6 +118,24 @@ def parse_txt_folder(folder: str | Path) -> pd.DataFrame:
             # Ignore unrelated TXT files rather than guessing coordinates.
             continue
 
+        if require_matching_se and not path.with_suffix(".SE").exists():
+            # The TXT may still be useful raw output, but without the acquired
+            # measurement file it is not accepted as a live mapping point.
+            continue
+
+        try:
+            parameters = parse_completeease_txt(path)
+        except Exception:
+            # Raw files are preserved by MappingRunner even when this parser
+            # cannot read them. Do not let one unusable TXT prevent the other
+            # valid points in the experiment from loading.
+            continue
+
+        if not parameters:
+            # A CompleteEASE export with no readable numeric parameter values
+            # is raw evidence of the attempt, but not a Results-table point.
+            continue
+
         x, y = coordinate
         if coordinate in seen_coordinates:
             raise ValueError(
@@ -118,12 +144,12 @@ def parse_txt_folder(folder: str | Path) -> pd.DataFrame:
         seen_coordinates.add(coordinate)
 
         row: dict[str, object] = {"X": x, "Y": y}
-        row.update(parse_completeease_txt(path))
+        row.update(parameters)
         rows.append(row)
 
     if not rows:
         raise ValueError(
-            "No supported mapping TXT files were found. "
+            "No usable supported mapping TXT files were found. "
             "Expected names such as X-4_Y2.txt or legacy (-1,0).txt."
         )
 

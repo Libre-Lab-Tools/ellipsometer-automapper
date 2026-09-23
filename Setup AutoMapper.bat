@@ -29,9 +29,7 @@ if %ERRORLEVEL% EQU 0 (
 
 echo ERROR: Python was not found on this computer.
 echo.
-echo Install a 64-bit Python version 3.10 or newer, then run this file again.
-echo Python can be downloaded from:
-echo https://www.python.org/downloads/windows/
+echo Install 64-bit Python 3.12 or newer, then run this file again.
 echo.
 pause
 exit /b 1
@@ -48,33 +46,23 @@ if not exist ".venv\Scripts\python.exe" (
 echo.
 echo Updating pip...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
-
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo ERROR: pip could not be updated.
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 goto ERROR_INSTALL
 
 echo.
 echo Installing AutoMapper requirements...
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo ERROR: One or more Python packages could not be installed.
-    echo Check the messages above.
-    pause
-    exit /b 1
-)
+if %ERRORLEVEL% NEQ 0 goto ERROR_INSTALL
 
 echo.
 echo ==========================================
 echo   Setup completed successfully.
 echo ==========================================
 echo.
-echo Next:
-echo 1. Edit config.json for this computer.
-echo 2. Double-click "Run AutoMapper.bat".
-echo.
 pause
+exit /b 0
+
+:ERROR_INSTALL
+echo.
+echo ERROR: AutoMapper setup did not complete successfully.
+pause
+exit /b 1

@@ -81,12 +81,24 @@ class StageController:
         with self._lock:
             self._status = f"MOVING {axis}"
         self._send(f"MOVE {axis} {position_mm:.6f}")
+        # The firmware is open-loop, so this is the commanded software
+        # coordinate rather than independent physical-position feedback.
+        with self._lock:
+            if axis == "X":
+                self._x = float(position_mm)
+            else:
+                self._y = float(position_mm)
 
     def move_relative(self, axis: str, distance_mm: float) -> None:
         axis = self._validate_axis(axis)
         with self._lock:
             self._status = f"MOVING {axis}"
         self._send(f"MOVEREL {axis} {distance_mm:.6f}")
+        with self._lock:
+            if axis == "X":
+                self._x += float(distance_mm)
+            else:
+                self._y += float(distance_mm)
 
     def wait_until_idle(self, timeout: float = 30.0) -> None:
         """Wait until the Arduino reports DONE/IDLE after a motion command."""
@@ -101,6 +113,9 @@ class StageController:
 
     def set_origin(self) -> None:
         self._send("SETORIGIN")
+        with self._lock:
+            self._x = 0.0
+            self._y = 0.0
 
     def request_position(self) -> None:
         self._send("POS?")

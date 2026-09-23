@@ -35,6 +35,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -79,6 +80,13 @@ SPATIAL_PLOT_TYPES = {
     "Measured Points + Values",
     "Pixel / Cell Map",
     "3D Surface",
+}
+
+POINT_STATISTICS_PLOT_TYPES = {
+    "Interpolated Map",
+    "Contour Map",
+    "Measured Points + Values",
+    "Pixel / Cell Map",
 }
 
 
@@ -173,6 +181,73 @@ class LineProfileWindow(QDialog):
         )
         if filename:
             self.figure.savefig(filename, dpi=300, bbox_inches="tight")
+
+    def closeEvent(self, event) -> None:
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class PointStatisticsWindow(QDialog):
+    """Statistics for user-selected measured points."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, results_page, parent=None) -> None:
+        super().__init__(parent)
+        self.results_page = results_page
+        self.setWindowTitle("Point Statistics")
+        self.setModal(False)
+        self.resize(420, 330)
+
+        layout = QVBoxLayout(self)
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+
+        note = QLabel(
+            "Click a measured point to select it. Hold Ctrl and click to add or "
+            "remove multiple points. Statistics update for the selected points. "
+            "Closing this window clears the Point Statistics selection."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666666;")
+        layout.addWidget(note)
+
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Statistic", "Value"])
+        self.table.setRowCount(5)
+        layout.addWidget(self.table, 1)
+
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        layout.addLayout(row)
+
+    def update_statistics(
+        self,
+        *,
+        parameter: str,
+        selected_data: pd.DataFrame,
+    ) -> None:
+        count = len(selected_data)
+        self.info.setText(
+            f"<b>Parameter:</b> {parameter}<br>"
+            f"<b>Selected measurements:</b> {count}"
+        )
+
+        names = ["Mean", "Std. Dev.", "Minimum", "Maximum", "Range (%)"]
+        stats = statistics_for(selected_data, parameter) if count else {}
+        for row, name in enumerate(names):
+            self.table.setItem(row, 0, QTableWidgetItem(name))
+            value = stats.get(name, np.nan)
+            text = "—" if not np.isfinite(value) else f"{value:.6g}"
+            self.table.setItem(row, 1, QTableWidgetItem(text))
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
 
     def closeEvent(self, event) -> None:
         self.closed.emit()
@@ -726,8 +801,13 @@ class ResultsPage(QWidget):
         self._ignored_artists: list = []
         self._measurement_marker_artists: list = []
         self._profile_overlay_artists: list = []
+        self._point_statistics_artists: list = []
         self._plot_render_ok = False
         self._export_include_markers = True
+
+        self._point_statistics_active = False
+        self._point_statistics_rows: set[int] = set()
+        self._point_statistics_window: PointStatisticsWindow | None = None
 
         self._line_profile_selecting = False
         self._line_profile_start: tuple[float, float] | None = None
@@ -759,6 +839,7 @@ class ResultsPage(QWidget):
         into a newly imported dataset.
         """
         if dataframe is None or dataframe.empty:
+            self._clear_point_statistics(close_window=True, redraw=False)
             self.data = pd.DataFrame()
             self.selected_row = None
             self.table.clear()
@@ -773,6 +854,7 @@ class ResultsPage(QWidget):
             self._redraw()
             return
 
+        self._clear_point_statistics(close_window=True, redraw=False)
         incoming = dataframe.copy().reset_index(drop=True)
         if "Included" not in incoming.columns:
             incoming["Included"] = True
@@ -883,6 +965,16 @@ class ResultsPage(QWidget):
         )
         self.line_profile_button.clicked.connect(self._toggle_line_profile_mode)
         controls.addWidget(self.line_profile_button)
+
+        self.point_statistics_button = QPushButton("Point Statistics")
+        self.point_statistics_button.setVisible(False)
+        self.point_statistics_button.setToolTip(
+            "Select one or more measured points for Point Statistics. Hold Ctrl while clicking to select multiple points."
+        )
+        self.point_statistics_button.clicked.connect(
+            self._toggle_point_statistics_mode
+        )
+        controls.addWidget(self.point_statistics_button)
 
         self.plot_options = QPushButton("Plot Options…")
         self.plot_options.clicked.connect(self._show_plot_options)
@@ -1153,6 +1245,7 @@ class ResultsPage(QWidget):
         self._ignored_artists = []
         self._measurement_marker_artists = []
         self._profile_overlay_artists = []
+        self._point_statistics_artists = []
         self._plot_render_ok = False
 
         parameter = self.parameter_combo.currentText()
@@ -1160,9 +1253,12 @@ class ResultsPage(QWidget):
 
         if not self._line_profile_mode_applicable(parameter, plot_type):
             self._clear_line_profile(close_window=True, redraw=False)
+        if not self._point_statistics_mode_applicable(parameter, plot_type):
+            self._clear_point_statistics(close_window=True, redraw=False)
 
         if self.data.empty or not parameter:
             self._update_line_profile_button()
+            self._update_point_statistics_button()
             self.canvas.draw_idle()
             return
 
@@ -1225,6 +1321,7 @@ class ResultsPage(QWidget):
                 )
 
         self._draw_selected_marker(parameter)
+        self._draw_point_statistics_markers(parameter)
 
         if plot_type == "Histogram":
             self.ax.set_xlabel(parameter)
@@ -1246,6 +1343,8 @@ class ResultsPage(QWidget):
         self._draw_line_profile_overlay()
         self._update_line_profile_window()
         self._update_line_profile_button()
+        self._update_point_statistics_window()
+        self._update_point_statistics_button()
 
         self.canvas.draw()
         self._refresh_selected_info()
@@ -1468,6 +1567,36 @@ class ResultsPage(QWidget):
             facecolors="none", edgecolors="#1f5fa8", linewidths=2.2, zorder=12,
         )
 
+    def _draw_point_statistics_markers(self, parameter: str) -> None:
+        if (
+            self.ax is None
+            or not self._point_statistics_rows
+            or self.plot_type_combo.currentText() not in POINT_STATISTICS_PLOT_TYPES
+        ):
+            return
+
+        for row_index in sorted(self._point_statistics_rows):
+            if row_index < 0 or row_index >= len(self.data):
+                continue
+            row = self.data.iloc[row_index]
+            if not bool(row.get("Included", True)):
+                continue
+            value = pd.to_numeric(
+                pd.Series([row.get(parameter)]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(value):
+                continue
+            artist = self.ax.scatter(
+                [float(row["X"])],
+                [float(row["Y"])],
+                s=190,
+                facecolors="none",
+                edgecolors="#1565C0",
+                linewidths=2.8,
+                zorder=14,
+            )
+            self._point_statistics_artists.append(artist)
+
     def _create_colorbar(self, mappable, parameter: str) -> None:
         label = self._custom_colorbar_label or parameter
         if self.cax is not None:
@@ -1574,6 +1703,14 @@ class ResultsPage(QWidget):
             and event.ydata is not None
         ):
             self._line_profile_map_click(float(event.xdata), float(event.ydata))
+            return
+
+        if (
+            self._point_statistics_active
+            and self.ax is not None
+            and event.inaxes is self.ax
+        ):
+            self._point_statistics_map_click(event)
             return
 
         if self._title_artist is not None:
@@ -1688,6 +1825,161 @@ class ResultsPage(QWidget):
         self._redraw()
 
     # ------------------------------------------------------------------
+    # Point statistics
+    # ------------------------------------------------------------------
+    def _point_statistics_mode_applicable(
+        self,
+        parameter: str | None = None,
+        plot_type: str | None = None,
+    ) -> bool:
+        parameter = (
+            parameter if parameter is not None else self.parameter_combo.currentText()
+        )
+        plot_type = (
+            plot_type if plot_type is not None else self.plot_type_combo.currentText()
+        )
+        return bool(
+            parameter
+            and not self.data.empty
+            and plot_type in POINT_STATISTICS_PLOT_TYPES
+        )
+
+    def _point_statistics_allowed(self) -> bool:
+        if not self._point_statistics_mode_applicable():
+            return False
+        parameter = self.parameter_combo.currentText()
+        values = pd.to_numeric(self.data.get(parameter), errors="coerce")
+        included = self.data["Included"].astype(bool)
+        return bool((included & values.notna()).any())
+
+    def _update_point_statistics_button(self) -> None:
+        self.point_statistics_button.setVisible(self._point_statistics_allowed())
+        self.point_statistics_button.setText(
+            "Cancel Point Statistics"
+            if self._point_statistics_active
+            else "Point Statistics"
+        )
+
+    def _toggle_point_statistics_mode(self) -> None:
+        if self._point_statistics_active:
+            self._clear_point_statistics(close_window=True, redraw=True)
+            return
+        if not self._point_statistics_allowed():
+            return
+
+        self._clear_line_profile(close_window=True, redraw=False)
+        self.selected_row = None
+        self.table.blockSignals(True)
+        self.table.clearSelection()
+        self.table.blockSignals(False)
+        self._refresh_selected_info()
+
+        self._point_statistics_rows.clear()
+        self._point_statistics_active = True
+        self.point_statistics_button.setText("Cancel Point Statistics")
+        self.cursor_readout.setText(
+            "Point statistics: click a measured point; Ctrl+click adds/removes points."
+        )
+        self._redraw()
+
+    def _point_statistics_map_click(self, event) -> None:
+        if self.ax is None or event.inaxes is not self.ax:
+            return
+
+        parameter = self.parameter_combo.currentText()
+        best = None
+        for row_index, row in self.data.iterrows():
+            if not bool(row.get("Included", True)):
+                continue
+            value = pd.to_numeric(
+                pd.Series([row.get(parameter)]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(value):
+                continue
+            px, py = self.ax.transData.transform(
+                (float(row["X"]), float(row["Y"]))
+            )
+            distance = ((event.x - px) ** 2 + (event.y - py) ** 2) ** 0.5
+            if distance <= 12 and (best is None or distance < best[1]):
+                best = (int(row_index), distance)
+
+        if best is None:
+            return
+
+        row_index = best[0]
+        # Matplotlib's MouseEvent.key is not reliable for Ctrl on every Qt/
+        # Windows combination. Read the live Qt keyboard modifiers directly,
+        # with the Matplotlib value only as a fallback.
+        modifiers = QApplication.keyboardModifiers()
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        if not ctrl:
+            key_text = str(event.key).lower() if event.key is not None else ""
+            ctrl = "control" in key_text or "ctrl" in key_text
+
+        if ctrl:
+            if row_index in self._point_statistics_rows:
+                self._point_statistics_rows.remove(row_index)
+            else:
+                self._point_statistics_rows.add(row_index)
+        else:
+            self._point_statistics_rows = {row_index}
+
+        if self._point_statistics_rows and self._point_statistics_window is None:
+            self._point_statistics_window = PointStatisticsWindow(self, self)
+            self._point_statistics_window.closed.connect(
+                self._point_statistics_window_closed
+            )
+
+        self._redraw()
+        if self._point_statistics_window is not None:
+            self._point_statistics_window.show()
+            self._point_statistics_window.raise_()
+            self._point_statistics_window.activateWindow()
+
+    def _point_statistics_dataframe(self) -> pd.DataFrame:
+        valid_rows = [
+            row
+            for row in sorted(self._point_statistics_rows)
+            if 0 <= row < len(self.data) and bool(self.data.iloc[row]["Included"])
+        ]
+        if not valid_rows:
+            return self.data.iloc[0:0].copy()
+        return self.data.iloc[valid_rows].copy()
+
+    def _update_point_statistics_window(self) -> None:
+        if self._point_statistics_window is None:
+            return
+        self._point_statistics_window.update_statistics(
+            parameter=self.parameter_combo.currentText(),
+            selected_data=self._point_statistics_dataframe(),
+        )
+
+    def _point_statistics_window_closed(self) -> None:
+        self._clear_point_statistics(close_window=False, redraw=True)
+
+    def _clear_point_statistics(
+        self,
+        *,
+        close_window: bool,
+        redraw: bool,
+    ) -> None:
+        window = self._point_statistics_window
+        self._point_statistics_window = None
+        self._point_statistics_active = False
+        self._point_statistics_rows.clear()
+
+        if close_window and window is not None:
+            window.blockSignals(True)
+            window.close()
+            window.blockSignals(False)
+            window.deleteLater()
+
+        if hasattr(self, "point_statistics_button"):
+            self.point_statistics_button.setText("Point Statistics")
+        if redraw and hasattr(self, "canvas"):
+            self._redraw()
+
+    # ------------------------------------------------------------------
     # Qualitative interpolated thickness line profile
     # ------------------------------------------------------------------
     def _line_profile_mode_applicable(
@@ -1735,6 +2027,7 @@ class ResultsPage(QWidget):
             self._clear_line_profile(close_window=True, redraw=True)
             return
 
+        self._clear_point_statistics(close_window=True, redraw=False)
         self._clear_line_profile(close_window=True, redraw=False)
         self._line_profile_selecting = True
         self.line_profile_button.setText("Cancel Profile")
@@ -2139,6 +2432,7 @@ class ResultsPage(QWidget):
             artists.append(self._selected_artist)
         artists.extend(self._ignored_artists)
         artists.extend(self._profile_overlay_artists)
+        artists.extend(self._point_statistics_artists)
 
         if not self._export_include_markers:
             artists.extend(self._measurement_marker_artists)

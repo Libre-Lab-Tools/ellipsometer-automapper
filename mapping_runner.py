@@ -30,6 +30,27 @@ from completeease_common import CompleteEASECommunicationError
 from data_parser import parse_completeease_txt, parse_txt_folder
 
 
+def map_to_automatic_stage(x: float, y: float) -> tuple[float, float]:
+    """Convert sample/map coordinates to physical automatic-stage coordinates.
+
+    The ellipsometer beam is fixed while the stage moves the sample. Therefore
+    moving the beam to +X/+Y on the sample requires moving the sample/stage in
+    the opposite physical direction. The generic stage driver itself remains
+    uninverted and continues to report true physical stage coordinates.
+    """
+    return -float(x), -float(y)
+
+
+def automatic_stage_to_map(x: float, y: float) -> tuple[float, float]:
+    """Convert physical automatic-stage coordinates to sample/map coordinates."""
+    return -float(x), -float(y)
+
+
+def map_delta_to_automatic_stage(delta: float) -> float:
+    """Convert a map-coordinate jog/displacement to physical stage motion."""
+    return -float(delta)
+
+
 @dataclass
 class ExperimentPaths:
     root: Path
@@ -92,10 +113,15 @@ class MappingRunner:
         if stage is not None:
             if x is None or y is None:
                 raise ValueError("x and y are required when a stage is supplied.")
-            stage.move("X", x)
+
+            # x/y are scientific map coordinates: where the fixed beam should
+            # interrogate the sample. The automatic stage physically moves the
+            # sample, so its commanded coordinates are the opposite sign.
+            stage_x, stage_y = map_to_automatic_stage(x, y)
+            stage.move("X", stage_x)
             if hasattr(stage, "wait_until_idle"):
                 stage.wait_until_idle()
-            stage.move("Y", y)
+            stage.move("Y", stage_y)
             if hasattr(stage, "wait_until_idle"):
                 stage.wait_until_idle()
 

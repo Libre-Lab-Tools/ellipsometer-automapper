@@ -203,3 +203,24 @@ multi-selection and note that closing the window clears that selection.
   operator-confirmed coordinate as the displayed stage position.
 - Manual-stage mapping prompts show the requested map/absolute coordinates in
   large text for easier viewing while operating through a glovebox.
+
+
+## V1.31 custom rectangular grids
+
+Grid size is now defined independently along X and Y. Each axis can use an odd
+point count from 3 through 21:
+
+`3, 5, 7, 9, 11, 13, 15, 17, 19, 21`
+
+Examples include `19 × 19`, `19 × 11`, `15 × 9`, or `7 × 17`.
+
+Odd point counts preserve `(0, 0)` as a real measurement position and retain
+whole-millimeter coordinates with the existing integer spacing choices.
+AutoMapper displays X span, Y span, and total measurements separately.
+
+At 1 mm spacing, `21 × 21` covers the full current 20 mm × 20 mm mapping span
+with 441 measurement points.
+
+The Automatic XY Stage setup/jog controls again represent **physical stage
+motion** directly. Coordinate inversion is applied only when AutoMapper converts
+a requested sample/measurement position into an automatic-stage motion.

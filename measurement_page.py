@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -58,7 +59,9 @@ from completeease_simulator import CompleteEASESimulator
 from mapping_runner import (
     MappingRunner,
     PointAcquisitionThread,
+    automatic_stage_to_map,
     create_experiment_folder,
+    map_delta_to_automatic_stage,
 )
 from stage import StageController
 from stage_simulator import StageSimulator
@@ -244,6 +247,11 @@ class ManualStageDialog(QDialog):
         coordinates = QLabel(coordinate_text)
         coordinates.setTextFormat(Qt.TextFormat.RichText)
         coordinates.setWordWrap(True)
+        coordinates.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        coordinates.setMinimumWidth(0)
         coordinates.setStyleSheet(
             "padding: 8px 2px 4px 2px;"
         )
@@ -329,6 +337,16 @@ class ManualStageDialog(QDialog):
         self.buttons.append(self.abort_button)
 
         layout.addLayout(button_row)
+
+        # Keep the large one-decimal coordinate line readable while allowing
+        # the operator to resize the prompt freely in both directions.
+        self.setMinimumWidth(500)
+        self.setMaximumWidth(16777215)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.setSizeGripEnabled(True)
 
         self._focus_index = 0
         self.measure_button.setFocus()
@@ -854,7 +872,7 @@ class MeasurementPage(QWidget):
     failed_points_updated = pyqtSignal(object)
     experiment_results_folder_updated = pyqtSignal(str)
 
-    GRID_OPTIONS = [3, 5, 7, 9]
+    GRID_OPTIONS = list(range(3, 22, 2))  # 3, 5, ..., 21
     SPACING_OPTIONS = [1, 2, 3, 4, 5]
     MAX_MAP_SPAN_MM = 20
 
@@ -885,6 +903,11 @@ class MeasurementPage(QWidget):
         self._dataset_kind = "planned_grid"
         self._experiment_recipe_name: str | None = None
         self.single_point_dialog: SinglePointDialog | None = None
+
+        # Manual-stage prompts remember their last position and size during
+        # this AutoMapper session. The first prompt uses Qt's normal placement;
+        # subsequent prompts reopen with the saved geometry.
+        self._manual_stage_dialog_geometry = None
 
         self.quality_dialog = MeasurementQualityDialog(self)
 
@@ -963,12 +986,32 @@ class MeasurementPage(QWidget):
         save_row.addWidget(self.browse_button)
         form.addRow("Save location:", save_row)
 
-        self.grid_combo = QComboBox()
+        self.grid_points_widget = QWidget()
+        grid_points_layout = QHBoxLayout(self.grid_points_widget)
+        grid_points_layout.setContentsMargins(0, 0, 0, 0)
+        grid_points_layout.setSpacing(8)
+
+        self.x_points_combo = QComboBox()
+        self.y_points_combo = QComboBox()
         for n in self.GRID_OPTIONS:
-            self.grid_combo.addItem(f"{n} × {n}", n)
-        self.grid_combo.setCurrentIndex(1)
-        self.grid_combo.currentIndexChanged.connect(self._rebuild_grid)
-        form.addRow("Grid:", self.grid_combo)
+            self.x_points_combo.addItem(str(n), n)
+            self.y_points_combo.addItem(str(n), n)
+
+        # Preserve the previous 5 × 5 default.
+        self.x_points_combo.setCurrentIndex(1)
+        self.y_points_combo.setCurrentIndex(1)
+
+        self.x_points_combo.currentIndexChanged.connect(self._rebuild_grid)
+        self.y_points_combo.currentIndexChanged.connect(self._rebuild_grid)
+
+        grid_points_layout.addWidget(QLabel("X"))
+        grid_points_layout.addWidget(self.x_points_combo)
+        grid_points_layout.addSpacing(8)
+        grid_points_layout.addWidget(QLabel("Y"))
+        grid_points_layout.addWidget(self.y_points_combo)
+        grid_points_layout.addStretch()
+
+        form.addRow("Grid points:", self.grid_points_widget)
 
         self.spacing_combo = QComboBox()
         for spacing in self.SPACING_OPTIONS:
@@ -1372,18 +1415,21 @@ class MeasurementPage(QWidget):
     # Mapping definition
     # ------------------------------------------------------------------
     def _rebuild_grid(self) -> None:
-        n = int(self.grid_combo.currentData())
+        nx = int(self.x_points_combo.currentData())
+        ny = int(self.y_points_combo.currentData())
         spacing = int(self.spacing_combo.currentData())
-        half = (n - 1) // 2
+
+        half_x = (nx - 1) // 2
+        half_y = (ny - 1) // 2
 
         points: list[dict] = []
         # Snake path starts at the top-left: right across the first row, then
         # down one row and left, alternating direction for each row.
-        for row in range(n):
-            y = (half - row) * spacing
-            columns = range(n) if row % 2 == 0 else range(n - 1, -1, -1)
+        for row in range(ny):
+            y = (half_y - row) * spacing
+            columns = range(nx) if row % 2 == 0 else range(nx - 1, -1, -1)
             for column in columns:
-                x = (column - half) * spacing
+                x = (column - half_x) * spacing
                 points.append({"X": x, "Y": y, "status": "PENDING"})
 
         self.points = points
@@ -1391,20 +1437,21 @@ class MeasurementPage(QWidget):
             self._dataset_kind = "planned_grid"
         self.progress.set_points(points)
 
-        span = (n - 1) * spacing
-        self.span_label.setText(f"{span} × {span} mm")
-        self.points_label.setText(str(n * n))
+        span_x = (nx - 1) * spacing
+        span_y = (ny - 1) * spacing
+        self.span_label.setText(f"X: {span_x} mm    Y: {span_y} mm")
+        self.points_label.setText(str(nx * ny))
 
         self._validate_setup()
 
     def _validate_setup(self) -> bool:
-        if not hasattr(self, "grid_combo"):
+        if not hasattr(self, "x_points_combo"):
             return False
 
         name = self.map_name.text().strip()
-        span = (int(self.grid_combo.currentData()) - 1) * int(
-            self.spacing_combo.currentData()
-        )
+        spacing = int(self.spacing_combo.currentData())
+        span_x = (int(self.x_points_combo.currentData()) - 1) * spacing
+        span_y = (int(self.y_points_combo.currentData()) - 1) * spacing
 
         problems = []
         if name and INVALID_WINDOWS_CHARS.search(name):
@@ -1413,10 +1460,10 @@ class MeasurementPage(QWidget):
         if not self.save_location.text().strip():
             problems.append("Save location cannot be empty.")
 
-        if span > self.MAX_MAP_SPAN_MM:
+        if span_x > self.MAX_MAP_SPAN_MM or span_y > self.MAX_MAP_SPAN_MM:
             problems.append(
                 f"Mapping span exceeds the {self.MAX_MAP_SPAN_MM} × "
-                f"{self.MAX_MAP_SPAN_MM} mm V1 limit."
+                f"{self.MAX_MAP_SPAN_MM} mm limit."
             )
 
         if problems:
@@ -1609,8 +1656,9 @@ class MeasurementPage(QWidget):
             return
 
         try:
-            x, y = self.stage.position
-            self.progress.set_stage_position(float(x), float(y))
+            stage_x, stage_y = self.stage.position
+            map_x, map_y = automatic_stage_to_map(stage_x, stage_y)
+            self.progress.set_stage_position(map_x, map_y)
         except Exception:
             self.progress.set_stage_position(None)
 
@@ -1656,7 +1704,8 @@ class MeasurementPage(QWidget):
             self.map_name,
             self.save_location,
             self.browse_button,
-            self.grid_combo,
+            self.x_points_combo,
+            self.y_points_combo,
             self.spacing_combo,
             self.stage_type,
             self.track_absolute,
@@ -1796,7 +1845,8 @@ class MeasurementPage(QWidget):
 
         current_x = current_y = 0.0
         if automatic:
-            current_x, current_y = self.stage.position
+            stage_x, stage_y = self.stage.position
+            current_x, current_y = automatic_stage_to_map(stage_x, stage_y)
 
         dialog = SinglePointDialog(
             automatic=automatic,
@@ -1824,13 +1874,19 @@ class MeasurementPage(QWidget):
             QMessageBox.information(self, "Stage", "Connect the stage first.")
             return
         try:
-            self.stage.move_relative(axis, direction * step)
+            # Arrow direction is expressed in sample/map coordinates. The
+            # physical automatic stage must move the sample oppositely.
+            map_delta = direction * step
+            stage_delta = map_delta_to_automatic_stage(map_delta)
+            self.stage.move_relative(axis, stage_delta)
             self.stage.wait_until_idle()
             self.stage_status.setText(self.stage.status)
-            x, y = self.stage.position
-            self.progress.set_stage_position(x, y)
+
+            stage_x, stage_y = self.stage.position
+            map_x, map_y = automatic_stage_to_map(stage_x, stage_y)
+            self.progress.set_stage_position(map_x, map_y)
             if self.single_point_dialog is not None:
-                self.single_point_dialog.set_current_position(x, y)
+                self.single_point_dialog.set_current_position(map_x, map_y)
         except Exception as exc:
             QMessageBox.warning(self, "Stage", str(exc))
 
@@ -1974,19 +2030,16 @@ class MeasurementPage(QWidget):
             QMessageBox.information(self, "Stage", "Connect the stage first.")
             return
         try:
-            step = direction * self.jog_step.value()
-            marker_position = self.progress.stage_position
-            if marker_position is None:
-                marker_position = self.stage.position
-            target_x, target_y = marker_position
-            if axis == "X":
-                target_x += step
-            else:
-                target_y += step
-
-            self.stage.move_relative(axis, step)
+            # These setup controls describe the physical automatic stage itself.
+            # Right/+X and Up/+Y therefore command positive physical stage motion.
+            # The progress-map marker is converted back to beam/sample coordinates.
+            stage_step = direction * self.jog_step.value()
+            self.stage.move_relative(axis, stage_step)
             self.stage_status.setText(self.stage.status)
-            self.progress.set_stage_position(target_x, target_y)
+
+            stage_x, stage_y = self.stage.position
+            map_x, map_y = automatic_stage_to_map(stage_x, stage_y)
+            self.progress.set_stage_position(map_x, map_y)
         except Exception as exc:
             QMessageBox.warning(self, "Stage", str(exc))
 
@@ -2040,6 +2093,15 @@ class MeasurementPage(QWidget):
                 f"could not return to the mapping center (0, 0).\n\n{exc}",
             )
             return False
+
+    def _exec_manual_stage_dialog(self, prompt: ManualStageDialog) -> int:
+        """Run a manual-stage prompt and remember its last position and size."""
+        if self._manual_stage_dialog_geometry is not None:
+            prompt.restoreGeometry(self._manual_stage_dialog_geometry)
+
+        result = prompt.exec()
+        self._manual_stage_dialog_geometry = prompt.saveGeometry()
+        return result
 
     # ------------------------------------------------------------------
     # Mapping acquisition
@@ -2148,7 +2210,7 @@ class MeasurementPage(QWidget):
                 retake=False,
                 parent=self,
             )
-            action = prompt.exec()
+            action = self._exec_manual_stage_dialog(prompt)
 
             if action == ManualStageDialog.SKIP:
                 # A skipped point has no acquired measurement file, so it stays
@@ -2284,8 +2346,9 @@ class MeasurementPage(QWidget):
             if self.single_point_dialog is not None:
                 self.single_point_dialog.set_busy(False)
                 if self.stage is not None and self.stage.connected:
-                    x, y = self.stage.position
-                    self.single_point_dialog.set_current_position(x, y)
+                    stage_x, stage_y = self.stage.position
+                    map_x, map_y = automatic_stage_to_map(stage_x, stage_y)
+                    self.single_point_dialog.set_current_position(map_x, map_y)
             if self.selected_point_index is not None:
                 self._select_point(self.selected_point_index, select_table=True)
             self._validate_setup()
@@ -2527,7 +2590,7 @@ class MeasurementPage(QWidget):
                 retake=point["status"] in ("MEASURED", "WARNING"),
                 parent=self,
             )
-            if prompt.exec() != ManualStageDialog.MEASURE:
+            if self._exec_manual_stage_dialog(prompt) != ManualStageDialog.MEASURE:
                 return
             self.progress.set_stage_position(float(point["X"]), float(point["Y"]))
 
